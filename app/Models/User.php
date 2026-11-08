@@ -17,13 +17,20 @@ use Illuminate\Support\Str;
  * @property int $id
  * @property string $name
  * @property string $email
+ * @property string|null $id_number
+ * @property string|null $phone_number
+ * @property string|null $institution
+ * @property string|null $photo_url
+ * @property int|null $registrations_count
+ * @property int|null $exam_sessions_count
+ * @property int|null $certificates_count
  * @property Carbon|null $email_verified_at
  * @property string $password
  * @property string|null $remember_token
  * @property Carbon|null $created_at
  * @property Carbon|null $updated_at
  */
-#[Fillable(['name', 'email', 'password', 'id_number', 'phone_number', 'institution'])]
+#[Fillable(['name', 'email', 'password', 'id_number', 'phone_number', 'institution', 'photo_url'])]
 #[Hidden(['password', 'remember_token'])]
 class User extends Authenticatable
 {

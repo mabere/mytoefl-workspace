@@ -10,8 +10,10 @@ use App\Models\ExamToken;
 use App\Models\User;
 use App\Support\ToeflScoring;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 /** Regression coverage for the production hardening fixes. */
@@ -149,5 +151,135 @@ class CurrentBehaviorAuditTest extends TestCase
         DB::enableQueryLog();
         $this->getJson('/api/admin/sessions?limit=2')->assertOk()->assertJsonCount(2, 'sessions')->assertJsonPath('limit', 2);
         DB::disableQueryLog();
+    }
+
+    public function test_admin_can_manage_student_and_admin_users(): void
+    {
+        $this->getJson('/api/admin/users')->assertUnauthorized();
+        $this->getJson('/api/admin/admin-users')->assertUnauthorized();
+
+        $admin = AdminUser::create(['username' => 'superadmin', 'password' => bcrypt('password123'), 'name' => 'Super Admin']);
+        $this->withSession(['admin_id' => $admin->id]);
+
+        // Create student user
+        $created = $this->postJson('/api/admin/users', [
+            'name' => 'Peserta Baru',
+            'email' => 'peserta.baru@example.test',
+            'password' => 'rahasia123',
+            'idNumber' => '19990101',
+            'phoneNumber' => '08123456789',
+            'institution' => 'Universitas Nusantara',
+        ])->assertCreated()->json('user');
+
+        $this->assertSame('Peserta Baru', $created['name']);
+
+        // Update student user
+        $this->putJson('/api/admin/users', [
+            'id' => $created['id'],
+            'name' => 'Peserta Terupdate',
+            'email' => 'peserta.baru@example.test',
+            'idNumber' => '19990202',
+            'phoneNumber' => '08123456789',
+            'institution' => 'Institut Teknologi',
+            'password' => 'passwordbaru123',
+        ])->assertOk()->assertJsonPath('user.name', 'Peserta Terupdate');
+
+        // Delete student user without exam history succeeds
+        $this->deleteJson('/api/admin/users?id='.$created['id'])->assertOk();
+        $this->assertDatabaseMissing('users', ['id' => $created['id']]);
+
+        // Student with exam session cannot be deleted
+        $studentWithExam = User::factory()->create();
+        $this->fixture($studentWithExam);
+        $this->deleteJson('/api/admin/users?id='.$studentWithExam->id)->assertStatus(409);
+
+        // Create second admin user
+        $secondAdmin = $this->postJson('/api/admin/admin-users', [
+            'username' => 'proktor2',
+            'name' => 'Proktor Dua',
+            'password' => 'proktor12345',
+        ])->assertCreated()->json('admin');
+
+        // Cannot delete own active admin account
+        $this->deleteJson('/api/admin/admin-users?id='.$admin->id)->assertStatus(409);
+
+        // Can delete other admin account
+        $this->deleteJson('/api/admin/admin-users?id='.$secondAdmin['id'])->assertOk();
+        $this->assertDatabaseMissing('admin_users', ['id' => $secondAdmin['id']]);
+    }
+
+    public function test_student_can_update_profile_photo_password_and_personal_data_with_email_immutable(): void
+    {
+        Storage::fake('public');
+
+        $user = User::create([
+            'name' => 'Budi Santoso',
+            'email' => 'budi.asli@example.test',
+            'password' => bcrypt('passwordlama123'),
+            'id_number' => '31710001',
+            'phone_number' => '0811111111',
+            'institution' => 'Kampus Lama',
+        ]);
+
+        $this->actingAs($user);
+
+        // Update personal data, photo, and password while attempting to send a different email
+        $response = $this->post('/api/student/profile', [
+            'name' => 'Budi Santoso, S.Kom.',
+            'email' => 'email.bajakan@example.test',
+            'idNumber' => '31719999',
+            'phoneNumber' => '0822222222',
+            'institution' => 'Universitas Indonesia',
+            'currentPassword' => 'passwordlama123',
+            'newPassword' => 'passwordbaru456',
+            'confirmPassword' => 'passwordbaru456',
+            'photo' => UploadedFile::fake()->image('avatar.png', 200, 200),
+        ])->assertOk()->json('student');
+
+        $this->assertSame('Budi Santoso, S.Kom.', $response['name']);
+        $this->assertSame('budi.asli@example.test', $response['email']);
+        $this->assertSame('31719999', $response['idNumber']);
+        $this->assertSame('0822222222', $response['phoneNumber']);
+        $this->assertSame('Universitas Indonesia', $response['institution']);
+        $this->assertNotEmpty($response['photoUrl']);
+
+        $user->refresh();
+        $this->assertSame('budi.asli@example.test', $user->email);
+        $this->assertTrue(\Illuminate\Support\Facades\Hash::check('passwordbaru456', $user->password));
+    }
+
+    public function test_admin_can_update_own_profile_with_email_and_photo_and_password(): void
+    {
+        Storage::fake('public');
+
+        $admin = AdminUser::create([
+            'username' => 'admin_pusat',
+            'email' => 'admin.pusat@example.test',
+            'name' => 'Admin Pusat',
+            'password' => bcrypt('adminlama123'),
+        ]);
+
+        $this->withSession(['admin_id' => $admin->id]);
+
+        $response = $this->post('/api/admin/profile', [
+            'name' => 'Kepala Proktor Pusat',
+            'username' => 'proktor_utama',
+            'email' => 'proktor.utama@lembaga.test',
+            'currentPassword' => 'adminlama123',
+            'newPassword' => 'adminbaru456',
+            'confirmPassword' => 'adminbaru456',
+            'photo' => UploadedFile::fake()->image('admin_avatar.png', 200, 200),
+        ])->assertOk()->json('admin');
+
+        $this->assertSame('Kepala Proktor Pusat', $response['name']);
+        $this->assertSame('proktor_utama', $response['username']);
+        $this->assertSame('proktor.utama@lembaga.test', $response['email']);
+        $this->assertNotEmpty($response['photoUrl']);
+
+        $admin->refresh();
+        $this->assertSame('Kepala Proktor Pusat', $admin->name);
+        $this->assertSame('proktor_utama', $admin->username);
+        $this->assertSame('proktor.utama@lembaga.test', $admin->email);
+        $this->assertTrue(\Illuminate\Support\Facades\Hash::check('adminbaru456', $admin->password));
     }
 }

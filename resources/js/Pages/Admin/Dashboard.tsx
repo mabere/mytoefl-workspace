@@ -48,11 +48,18 @@ import {
   PhoneCall,
   Sparkles,
   RotateCcw,
+  User,
+  Camera,
+  Mail,
+  Lock,
+  EyeOff,
+  Save,
 } from "lucide-react";
 
 import { PackagePreviewModal } from "@/components/PackagePreviewModal";
 import { ValidationReport } from "@/lib/excelPackageParser";
 import { AdminInstitutionSettings } from "@/components/AdminInstitutionSettings";
+import { AdminUserManagement } from "@/components/AdminUserManagement";
 import {
   buildPaymentConfirmedWaUrl,
   buildCertificateReadyWaUrl,
@@ -63,6 +70,8 @@ interface AdminSessionUser {
   id: string;
   username: string;
   name: string;
+  email?: string | null;
+  photoUrl?: string | null;
 }
 
 interface AdminData {
@@ -249,11 +258,32 @@ export default function AdminPage() {
 
   // Auth & Admin state
   const [adminUser, setAdminUser] = useState<AdminSessionUser | null>(null);
-  const [activeTab, setActiveTab] = useState<"results" | "schedules" | "payments" | "certificates" | "tokens" | "packages" | "settings" | "leads">("results");
+  const [activeTab, setActiveTab] = useState<"results" | "schedules" | "payments" | "certificates" | "tokens" | "packages" | "settings" | "leads" | "users">("results");
+  const [totalUsersCount, setTotalUsersCount] = useState<number>(0);
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
   const [isDesktopCollapsed, setIsDesktopCollapsed] = useState(false);
   const [isLoadingAuth, setIsLoadingAuth] = useState(true);
   const [institutionLogoUrl, setInstitutionLogoUrl] = useState("/branding/institution-logo.svg");
+
+  // Admin Profile Modal state
+  const [isAdminProfileModalOpen, setIsAdminProfileModalOpen] = useState(false);
+  const [adminProfileForm, setAdminProfileForm] = useState({
+    name: "",
+    username: "",
+    email: "",
+    currentPassword: "",
+    newPassword: "",
+    confirmPassword: "",
+  });
+  const [adminPhotoFile, setAdminPhotoFile] = useState<File | null>(null);
+  const [adminPhotoPreviewUrl, setAdminPhotoPreviewUrl] = useState<string | null>(null);
+  const [adminRemovePhoto, setAdminRemovePhoto] = useState(false);
+  const [isSavingAdminProfile, setIsSavingAdminProfile] = useState(false);
+  const [adminProfileError, setAdminProfileError] = useState<string | null>(null);
+  const [adminProfileSuccess, setAdminProfileSuccess] = useState<string | null>(null);
+  const [showAdminCurrentPassword, setShowAdminCurrentPassword] = useState(false);
+  const [showAdminNewPassword, setShowAdminNewPassword] = useState(false);
+  const [showAdminConfirmPassword, setShowAdminConfirmPassword] = useState(false);
 
   // Leads (Calon Peserta Demo) state
   const [leads, setLeads] = useState<AdminLeadItem[]>([]);
@@ -341,6 +371,16 @@ export default function AdminPage() {
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
   const [validationReport, setValidationReport] = useState<ValidationReport | null>(null);
   const [pendingPackageData, setPendingPackageData] = useState<any>(null);
+
+  // Manual package creation state
+  const [showManualPkgModal, setShowManualPkgModal] = useState(false);
+  const [manualPkgTitle, setManualPkgTitle] = useState("");
+  const [manualPkgCode, setManualPkgCode] = useState("");
+  const [manualPkgDesc, setManualPkgDesc] = useState("");
+  const [manualPkgPreset, setManualPkgPreset] = useState<"FULL_140" | "MINIMAL">("FULL_140");
+  const [openEditorAfterCreate, setOpenEditorAfterCreate] = useState(true);
+  const [isCreatingManualPkg, setIsCreatingManualPkg] = useState(false);
+  const [manualPkgError, setManualPkgError] = useState<string | null>(null);
 
   // Check auth on mount
   useEffect(() => {
@@ -665,6 +705,14 @@ export default function AdminPage() {
       fetchCertificates();
       fetchPayments();
       fetchLeads();
+      fetch("/api/admin/users?limit=1")
+        .then((res) => res.json())
+        .then((json) => {
+          if (json?.summary?.totalUsers !== undefined) {
+            setTotalUsersCount(json.summary.totalUsers);
+          }
+        })
+        .catch(() => {});
     }
   }, [isLoadingAuth]);
 
@@ -674,6 +722,122 @@ export default function AdminPage() {
     }
   }, [leadSearch, leadFilter, activeTab]);
 
+
+  const openAdminProfileModal = () => {
+    if (!adminUser) return;
+    setAdminProfileForm({
+      name: adminUser.name || "",
+      username: adminUser.username || "",
+      email: adminUser.email || "",
+      currentPassword: "",
+      newPassword: "",
+      confirmPassword: "",
+    });
+    setAdminPhotoFile(null);
+    setAdminPhotoPreviewUrl(adminUser.photoUrl ? appUrl(adminUser.photoUrl) : null);
+    setAdminRemovePhoto(false);
+    setAdminProfileError(null);
+    setAdminProfileSuccess(null);
+    setShowAdminCurrentPassword(false);
+    setShowAdminNewPassword(false);
+    setShowAdminConfirmPassword(false);
+    setIsAdminProfileModalOpen(true);
+  };
+
+  const handleAdminPhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setAdminProfileError("Ukuran foto profil maksimal 5MB.");
+      return;
+    }
+    setAdminProfileError(null);
+    setAdminPhotoFile(file);
+    setAdminRemovePhoto(false);
+    setAdminPhotoPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const handleSaveAdminProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAdminProfileError(null);
+    setAdminProfileSuccess(null);
+
+    if (!adminProfileForm.name.trim()) {
+      setAdminProfileError("Nama lengkap wajib diisi.");
+      return;
+    }
+    if (!adminProfileForm.username.trim()) {
+      setAdminProfileError("Username wajib diisi.");
+      return;
+    }
+
+    if (adminProfileForm.newPassword) {
+      if (!adminProfileForm.currentPassword) {
+        setAdminProfileError("Masukkan kata sandi saat ini untuk mengubah kata sandi.");
+        return;
+      }
+      if (adminProfileForm.newPassword.length < 8) {
+        setAdminProfileError("Kata sandi baru minimal 8 karakter.");
+        return;
+      }
+      if (adminProfileForm.newPassword !== adminProfileForm.confirmPassword) {
+        setAdminProfileError("Konfirmasi kata sandi baru tidak cocok.");
+        return;
+      }
+    }
+
+    try {
+      setIsSavingAdminProfile(true);
+      const formData = new FormData();
+      formData.append("name", adminProfileForm.name.trim());
+      formData.append("username", adminProfileForm.username.trim());
+      formData.append("email", adminProfileForm.email.trim());
+
+      if (adminProfileForm.newPassword) {
+        formData.append("currentPassword", adminProfileForm.currentPassword);
+        formData.append("newPassword", adminProfileForm.newPassword);
+        formData.append("confirmPassword", adminProfileForm.confirmPassword);
+      }
+
+      if (adminPhotoFile) {
+        formData.append("photo", adminPhotoFile);
+      } else if (adminRemovePhoto) {
+        formData.append("removePhoto", "1");
+      }
+
+      const res = await fetch("/api/admin/profile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.success) {
+        const validationErrors = json.errors
+          ? Object.values(json.errors).flat().join(" ")
+          : null;
+        setAdminProfileError(validationErrors || json.error || "Gagal memperbarui profil administrator.");
+        return;
+      }
+
+      if (json.admin) {
+        setAdminUser(json.admin);
+      }
+      setAdminProfileSuccess(json.message || "Profil administrator berhasil diperbarui.");
+      setAdminProfileForm((prev) => ({
+        ...prev,
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: "",
+      }));
+      setAdminPhotoFile(null);
+      setAdminRemovePhoto(false);
+    } catch (err) {
+      console.error(err);
+      setAdminProfileError("Terjadi gangguan jaringan saat menyimpan profil administrator.");
+    } finally {
+      setIsSavingAdminProfile(false);
+    }
+  };
 
   const handleLogout = async () => {
     try {
@@ -823,6 +987,43 @@ export default function AdminPage() {
     } catch (err) {
       console.error("Save package error:", err);
       alert("Terjadi kesalahan saat menyimpan paket soal.");
+    }
+  };
+
+  const handleCreateManualPackage = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setManualPkgError(null);
+    try {
+      setIsCreatingManualPkg(true);
+      const res = await fetch("/api/admin/packages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          isManual: true,
+          title: manualPkgTitle,
+          code: manualPkgCode,
+          description: manualPkgDesc,
+          preset: manualPkgPreset,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        setManualPkgError(json.error || "Gagal membuat paket ujian manual.");
+        return;
+      }
+      setShowManualPkgModal(false);
+      setManualPkgTitle("");
+      setManualPkgCode("");
+      setManualPkgDesc("");
+      await fetchPackages();
+      if (openEditorAfterCreate && json.packageId) {
+        router.push(`/admin/packages/${json.packageId}`);
+      }
+    } catch (err) {
+      console.error("Manual package error:", err);
+      setManualPkgError("Terjadi kesalahan jaringan saat membuat paket soal.");
+    } finally {
+      setIsCreatingManualPkg(false);
     }
   };
 
@@ -1248,9 +1449,50 @@ export default function AdminPage() {
           <div>
             <div className={`${isDesktopCollapsed ? "hidden md:block my-2 border-t border-slate-800/80 mx-1" : "hidden"}`} />
             <div className={`${isDesktopCollapsed ? "md:hidden" : "block"} px-3 text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2`}>
-              Pengaturan & Identitas
+              Pengaturan & Pengguna
             </div>
             <div className="space-y-1">
+              <button
+                onClick={() => {
+                  setActiveTab("users");
+                  setIsMobileSidebarOpen(false);
+                }}
+                title="Manajemen Akun Peserta & Admin"
+                className={`w-full flex items-center ${
+                  isDesktopCollapsed ? "md:justify-center md:px-0 px-3 justify-between" : "justify-between px-3"
+                } py-2.5 rounded-xl text-xs font-bold transition group relative ${
+                  activeTab === "users"
+                    ? "bg-blue-600 text-white shadow-xs"
+                    : "text-slate-300 hover:bg-slate-800/70 hover:text-white"
+                }`}
+              >
+                <div className={`flex items-center ${isDesktopCollapsed ? "md:gap-0 gap-2.5" : "gap-2.5"}`}>
+                  <ShieldCheck className="w-4 h-4 shrink-0" />
+                  <span className={isDesktopCollapsed ? "md:hidden" : "inline"}>
+                    Manajemen User
+                  </span>
+                </div>
+                <span
+                  className={`${isDesktopCollapsed ? "md:hidden" : "inline-block"} text-[10.5px] font-mono px-2 py-0.5 rounded-full ${
+                    activeTab === "users"
+                      ? "bg-blue-500/50 text-white"
+                      : "bg-slate-800 text-slate-400"
+                  }`}
+                >
+                  {totalUsersCount}
+                </span>
+
+                {/* Floating Tooltip when Collapsed */}
+                {isDesktopCollapsed && (
+                  <div className="hidden group-hover:md:flex absolute left-full ml-3 px-3 py-1.5 bg-slate-950 text-white text-xs font-semibold rounded-lg shadow-xl whitespace-nowrap z-50 pointer-events-none items-center gap-2 border border-slate-800">
+                    <span>Manajemen User</span>
+                    <span className="text-[10px] bg-blue-600/60 px-1.5 py-0.2 rounded font-mono">
+                      {totalUsersCount}
+                    </span>
+                  </div>
+                )}
+              </button>
+
               <button
                 onClick={() => {
                   setActiveTab("settings");
@@ -1319,22 +1561,32 @@ export default function AdminPage() {
         {/* Sidebar Footer User Info */}
         <div className={`p-3 border-t border-slate-800 bg-slate-950/50 ${isDesktopCollapsed ? "md:p-2" : "p-4"}`}>
           <div className={`flex items-center ${isDesktopCollapsed ? "md:flex-col md:gap-2 justify-center" : "justify-between gap-3"}`}>
-            <div
-              className={`flex items-center ${isDesktopCollapsed ? "md:justify-center" : "gap-2.5"} min-w-0`}
-              title={`${adminUser?.name || "Administrator"} (@${adminUser?.username || "admin"})`}
+            <button
+              type="button"
+              onClick={openAdminProfileModal}
+              className={`flex items-center ${isDesktopCollapsed ? "md:justify-center" : "gap-2.5"} min-w-0 text-left rounded-xl p-1 -m-1 hover:bg-slate-800/60 transition group`}
+              title="Klik untuk Edit Profil Administrator"
             >
-              <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-xs text-blue-400 shrink-0">
-                {adminUser?.name?.charAt(0) || "A"}
+              <div className="w-8 h-8 rounded-full bg-slate-800 border border-slate-700 flex items-center justify-center font-bold text-xs text-blue-400 shrink-0 overflow-hidden relative">
+                {adminUser?.photoUrl ? (
+                  <img src={appUrl(adminUser.photoUrl)} alt={adminUser.name} className="w-full h-full object-cover" />
+                ) : (
+                  adminUser?.name?.charAt(0) || "A"
+                )}
+                <span className="absolute inset-0 bg-slate-950/60 text-white opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
+                  <Camera className="w-3.5 h-3.5" />
+                </span>
               </div>
               <div className={`min-w-0 ${isDesktopCollapsed ? "md:hidden" : "block"}`}>
-                <div className="text-xs font-bold text-white truncate">
-                  {adminUser?.name || "Administrator"}
+                <div className="text-xs font-bold text-white truncate group-hover:text-blue-300 transition flex items-center gap-1">
+                  <span>{adminUser?.name || "Administrator"}</span>
+                  <Edit className="w-3 h-3 opacity-0 group-hover:opacity-100 transition shrink-0" />
                 </div>
                 <div className="text-[10px] text-slate-400 truncate">
                   @{adminUser?.username || "admin"}
                 </div>
               </div>
-            </div>
+            </button>
 
             <button
               onClick={handleLogout}
@@ -1376,6 +1628,7 @@ export default function AdminPage() {
                 {activeTab === "certificates" && "Pangkalan Data E-Sertifikat"}
                 {activeTab === "tokens" && "Manajemen Token Ujian"}
                 {activeTab === "packages" && "Bank Soal & Multi-Paket"}
+                {activeTab === "users" && "Manajemen Akun Peserta & Administrator"}
                 {activeTab === "settings" && "Pengaturan Identitas & Mode Sistem"}
               </h2>
               <span className="text-[11px] text-slate-500 font-medium hidden sm:inline">
@@ -1395,6 +1648,21 @@ export default function AdminPage() {
               <ExternalLink className="w-3.5 h-3.5" />
               <span>Lihat Web</span>
             </Link>
+
+            {/* Admin Profile Button */}
+            <button
+              type="button"
+              onClick={openAdminProfileModal}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-blue-50 border border-slate-200 hover:border-blue-200 text-slate-700 hover:text-blue-700 rounded-xl font-bold text-xs transition shadow-2xs"
+              title="Edit Profil Administrator"
+            >
+              {adminUser?.photoUrl ? (
+                <img src={appUrl(adminUser.photoUrl)} alt={adminUser.name} className="w-4 h-4 rounded-full object-cover" />
+              ) : (
+                <User className="w-3.5 h-3.5 text-blue-600" />
+              )}
+              <span className="hidden sm:inline">Edit Profil</span>
+            </button>
 
             {/* Operating mode badge */}
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-50 border border-blue-200 text-blue-700 text-xs font-bold">
@@ -1788,6 +2056,17 @@ export default function AdminPage() {
                 />
 
                 <button
+                  onClick={() => {
+                    setManualPkgError(null);
+                    setShowManualPkgModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-4 py-2.5 bg-white hover:bg-blue-50 text-blue-900 rounded-xl text-xs font-bold transition shadow-sm active:scale-95"
+                >
+                  <Plus className="w-4 h-4 text-blue-600" />
+                  <span>Buat Paket Manual</span>
+                </button>
+
+                <button
                   onClick={() => fileInputRef.current?.click()}
                   disabled={isImporting}
                   className="flex items-center gap-1.5 px-4 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 rounded-xl text-xs font-bold transition shadow-sm active:scale-95 disabled:opacity-50"
@@ -1799,6 +2078,38 @@ export default function AdminPage() {
             </div>
 
             {/* PACKAGES LIST */}
+            {packages.length === 0 ? (
+              <div className="bg-white rounded-2xl border border-slate-200 p-12 text-center space-y-3 shadow-xs">
+                <Layers className="w-10 h-10 text-slate-300 mx-auto" />
+                <div>
+                  <h3 className="text-sm font-bold text-slate-800">
+                    Belum Ada Paket Bank Soal TOEFL
+                  </h3>
+                  <p className="text-xs text-slate-500 max-w-md mx-auto mt-1">
+                    Silakan buat paket secara manual untuk langsung mengisi soal di editor web, atau unggah file Excel (.xlsx) / JSON.
+                  </p>
+                </div>
+                <div className="flex items-center justify-center gap-3 pt-2">
+                  <button
+                    onClick={() => {
+                      setManualPkgError(null);
+                      setShowManualPkgModal(true);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Buat Paket Manual Sekarang</span>
+                  </button>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition"
+                  >
+                    <Upload className="w-4 h-4" />
+                    <span>Upload File Excel / JSON</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
               {packages.map((pkg) => (
                 <div
@@ -1889,6 +2200,7 @@ export default function AdminPage() {
                 </div>
               ))}
             </div>
+            )}
           </div>
         )}
 
@@ -2965,6 +3277,14 @@ export default function AdminPage() {
           </div>
         )}
 
+        {/* TAB: MANAJEMEN USER (PESERTA & ADMIN) */}
+        {activeTab === "users" && (
+          <AdminUserManagement
+            onTotalUsersChange={(count) => setTotalUsersCount(count)}
+            onCurrentAdminUpdated={(updated) => setAdminUser(updated)}
+          />
+        )}
+
         {/* TAB 4: PENGATURAN PLATFORM & IDENTITAS INSTITUSI */}
         {activeTab === "settings" && (
           <AdminInstitutionSettings
@@ -3168,6 +3488,426 @@ export default function AdminPage() {
                 {isProcessingPayment ? "Memproses..." : "Konfirmasi Tolak"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 3: BUAT PAKET BANK SOAL MANUAL */}
+      {showManualPkgModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl border border-slate-200 space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-900 flex items-center gap-2">
+                  <Layers className="w-5 h-5 text-blue-600" />
+                  <span>Buat Paket Bank Soal Baru (Manual)</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Buat paket soal langsung dari dashboard tanpa perlu menyiapkan file Excel/JSON terlebih dahulu.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowManualPkgModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {manualPkgError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{manualPkgError}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleCreateManualPackage} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Judul Paket Ujian *
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={manualPkgTitle}
+                  onChange={(e) => setManualPkgTitle(e.target.value)}
+                  placeholder="Contoh: Simulasi TOEFL ITP - Paket Reguler A"
+                  className="w-full px-3.5 py-2.5 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Kode Unik Paket (Opsional — Otomatis jika dikosongkan)
+                </label>
+                <input
+                  type="text"
+                  value={manualPkgCode}
+                  onChange={(e) => setManualPkgCode(e.target.value.toUpperCase())}
+                  placeholder="Contoh: ITP-PKG-01"
+                  className="w-full px-3.5 py-2.5 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono uppercase"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Deskripsi Paket (Opsional)
+                </label>
+                <textarea
+                  rows={2}
+                  value={manualPkgDesc}
+                  onChange={(e) => setManualPkgDesc(e.target.value)}
+                  placeholder="Keterangan singkat paket soal ini..."
+                  className="w-full px-3.5 py-2.5 text-xs border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-xs font-bold text-slate-700">
+                  Pilih Struktur Slot Soal Awal:
+                </label>
+
+                <label
+                  className={`flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition ${
+                    manualPkgPreset === "FULL_140"
+                      ? "bg-blue-50/70 border-blue-400 ring-1 ring-blue-400"
+                      : "bg-slate-50 border-slate-200 hover:bg-slate-100/70"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="manualPkgPreset"
+                    checked={manualPkgPreset === "FULL_140"}
+                    onChange={() => setManualPkgPreset("FULL_140")}
+                    className="mt-0.5 text-blue-600 focus:ring-blue-500"
+                  />
+                  <div className="text-xs">
+                    <div className="font-bold text-slate-900">
+                      Standar Resmi TOEFL ITP Lengkap (140 Slot Soal) — Direkomendasikan
+                    </div>
+                    <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                      Otomatis menyiapkan 50 soal Listening (+ 5 Passage Part B/C), 40 soal Structure & Written Expression, dan 50 soal Reading (+ 5 Passage Wacana) yang siap langsung diedit.
+                    </p>
+                  </div>
+                </label>
+
+                <label
+                  className={`flex items-start gap-3 p-3.5 rounded-xl border cursor-pointer transition ${
+                    manualPkgPreset === "MINIMAL"
+                      ? "bg-blue-50/70 border-blue-400 ring-1 ring-blue-400"
+                      : "bg-slate-50 border-slate-200 hover:bg-slate-100/70"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="manualPkgPreset"
+                    checked={manualPkgPreset === "MINIMAL"}
+                    onChange={() => setManualPkgPreset("MINIMAL")}
+                    className="mt-0.5 text-blue-600 focus:ring-blue-500"
+                  />
+                  <div className="text-xs">
+                    <div className="font-bold text-slate-900">
+                      Kerangka Minimal (Mulai dari 1 Soal per Section)
+                    </div>
+                    <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                      Membuat 3 section standar dengan masing-masing 1 contoh soal awal. Anda dapat menambah soal dan passage satu per satu di halaman editor.
+                    </p>
+                  </div>
+                </label>
+              </div>
+
+              <label className="flex items-center gap-2.5 p-3 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={openEditorAfterCreate}
+                  onChange={(e) => setOpenEditorAfterCreate(e.target.checked)}
+                  className="rounded text-blue-600 focus:ring-blue-500"
+                />
+                <span className="text-xs font-medium text-slate-700">
+                  Langsung buka halaman <strong>Editor Bank Soal</strong> setelah paket dibuat
+                </span>
+              </label>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setShowManualPkgModal(false)}
+                  className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isCreatingManualPkg}
+                  className="inline-flex items-center gap-1.5 px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition disabled:opacity-50"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>
+                    {isCreatingManualPkg
+                      ? "Membuat Paket..."
+                      : openEditorAfterCreate
+                      ? "Buat & Buka Editor Soal"
+                      : "Buat Paket Soal"}
+                  </span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: EDIT PROFIL ADMINISTRATOR */}
+      {isAdminProfileModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl border border-slate-200 space-y-5 my-8">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3.5">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Edit Profil Administrator
+                </h3>
+                <span className="text-[11px] text-slate-500">
+                  Perbarui identitas akun, email resmi, foto, dan kata sandi administrator
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAdminProfileModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {adminProfileError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{adminProfileError}</span>
+              </div>
+            )}
+
+            {adminProfileSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-medium flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                <span>{adminProfileSuccess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveAdminProfile} className="space-y-4">
+              {/* Foto Profil Admin */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-16 h-16 rounded-2xl bg-slate-800 text-white border border-slate-700 flex items-center justify-center font-bold text-xl overflow-hidden shrink-0">
+                    {adminPhotoPreviewUrl && !adminRemovePhoto ? (
+                      <img
+                        src={adminPhotoPreviewUrl}
+                        alt="Preview Foto Admin"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      adminProfileForm.name.charAt(0) || "A"
+                    )}
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-slate-900 block">
+                      Foto Profil Pengawas
+                    </span>
+                    <span className="text-[11px] text-slate-500 block mt-0.5">
+                      Format JPG, PNG, atau WEBP (Maks. 5MB)
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold transition shadow-2xs">
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Pilih Foto</span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={handleAdminPhotoSelect}
+                      className="hidden"
+                    />
+                  </label>
+                  {adminPhotoPreviewUrl && !adminRemovePhoto && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAdminPhotoFile(null);
+                        setAdminPhotoPreviewUrl(null);
+                        setAdminRemovePhoto(true);
+                      }}
+                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 rounded-xl transition"
+                      title="Hapus Foto Profil"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Data Akun */}
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Lengkap Administrator <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={adminProfileForm.name}
+                    onChange={(e) =>
+                      setAdminProfileForm({ ...adminProfileForm, name: e.target.value })
+                    }
+                    placeholder="Contoh: Pengawas Utama"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Username Login <span className="text-rose-500">*</span>
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={adminProfileForm.username}
+                      onChange={(e) =>
+                        setAdminProfileForm({ ...adminProfileForm, username: e.target.value })
+                      }
+                      placeholder="Username admin"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Email Administrator
+                    </label>
+                    <div className="relative">
+                      <input
+                        type="email"
+                        value={adminProfileForm.email}
+                        onChange={(e) =>
+                          setAdminProfileForm({ ...adminProfileForm, email: e.target.value })
+                        }
+                        placeholder="admin@lembaga.ac.id"
+                        className="w-full pl-9 pr-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                      <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    </div>
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-500">
+                  Email ini dapat digunakan untuk login ke portal <code>/admin/login</code> selain menggunakan username.
+                </p>
+              </div>
+
+              {/* Ubah Password (Opsional) */}
+              <div className="pt-3 border-t border-slate-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800">
+                    Ubah Kata Sandi (Opsional)
+                  </span>
+                  <span className="text-[10.5px] text-slate-400">
+                    Kosongkan jika tidak ingin mengganti
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    Kata Sandi Saat Ini
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showAdminCurrentPassword ? "text" : "password"}
+                      value={adminProfileForm.currentPassword}
+                      onChange={(e) =>
+                        setAdminProfileForm({ ...adminProfileForm, currentPassword: e.target.value })
+                      }
+                      placeholder="Masukkan kata sandi lama Anda"
+                      className="w-full pl-3.5 pr-9 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAdminCurrentPassword((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      {showAdminCurrentPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Kata Sandi Baru (Min. 8 Karakter)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showAdminNewPassword ? "text" : "password"}
+                        value={adminProfileForm.newPassword}
+                        onChange={(e) =>
+                          setAdminProfileForm({ ...adminProfileForm, newPassword: e.target.value })
+                        }
+                        placeholder="Kata sandi baru"
+                        className="w-full pl-3.5 pr-9 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAdminNewPassword((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        {showAdminNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Konfirmasi Kata Sandi Baru
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showAdminConfirmPassword ? "text" : "password"}
+                        value={adminProfileForm.confirmPassword}
+                        onChange={(e) =>
+                          setAdminProfileForm({ ...adminProfileForm, confirmPassword: e.target.value })
+                        }
+                        placeholder="Ulangi kata sandi baru"
+                        className="w-full pl-3.5 pr-9 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowAdminConfirmPassword((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        {showAdminConfirmPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAdminProfileModalOpen(false)}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition"
+                >
+                  Tutup
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingAdminProfile}
+                  className="flex-1 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-bold text-xs shadow-md transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingAdminProfile ? "Menyimpan..." : "Simpan Perubahan"}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

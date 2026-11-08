@@ -19,7 +19,7 @@ Route::get('/certificate/{verificationCode}', fn () => Inertia::render('Certific
 Route::get('/verify/{verificationCode}', fn () => Inertia::render('Verify'))->name('verify');
 Route::get('/admin/login', fn () => Inertia::render('Admin/Login'))->name('admin.login');
 Route::get('/admin', fn () => Inertia::render('Admin/Dashboard'))->name('admin.dashboard');
-Route::get('/admin/packages/{packageId}', fn () => Inertia::render('Admin/Package'))->name('admin.package');
+Route::get('/admin/packages/{packageId}', fn (string $packageId) => Inertia::render('Admin/Package', ['packageId' => $packageId]))->name('admin.package');
 
 Route::get('/sitemap.xml', function (Request $request) {
     $urls = ['/', '/privacy', '/terms'];

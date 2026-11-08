@@ -169,6 +169,108 @@ class ToeflApiController extends Controller
         ]);
     }
 
+    public function studentProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+        if (! $user) {
+            return response()->json(['error' => 'Sesi peserta tidak valid. Silakan login kembali.'], 401);
+        }
+
+        if ($request->isMethod('get')) {
+            return response()->json(['student' => $this->studentPayload($user)]);
+        }
+
+        $name = trim((string) $request->input('name', $user->name));
+        $idNumber = trim((string) $request->input('idNumber', (string) $user->id_number));
+        $phoneNumber = trim((string) $request->input('phoneNumber', (string) $user->phone_number));
+        $institution = trim((string) $request->input('institution', (string) $user->institution));
+
+        if ($name === '' || mb_strlen($name) > 120) {
+            return response()->json(['error' => 'Nama lengkap wajib diisi (maksimal 120 karakter).'], 422);
+        }
+        if (mb_strlen($idNumber) > 80) {
+            return response()->json(['error' => 'Nomor identitas maksimal 80 karakter.'], 422);
+        }
+        if (mb_strlen($phoneNumber) > 40) {
+            return response()->json(['error' => 'Nomor telepon/WhatsApp maksimal 40 karakter.'], 422);
+        }
+        if (mb_strlen($institution) > 190) {
+            return response()->json(['error' => 'Nama institusi maksimal 190 karakter.'], 422);
+        }
+
+        $newPassword = (string) $request->input('newPassword', '');
+        $currentPassword = (string) $request->input('currentPassword', '');
+        $confirmPassword = (string) $request->input('confirmPassword', '');
+
+        if ($newPassword !== '') {
+            if ($currentPassword === '' || ! Hash::check($currentPassword, $user->password)) {
+                return response()->json(['error' => 'Kata sandi saat ini tidak sesuai.'], 422);
+            }
+            if (mb_strlen($newPassword) < 8 || mb_strlen($newPassword) > 128) {
+                return response()->json(['error' => 'Kata sandi baru minimal 8 karakter.'], 422);
+            }
+            if ($confirmPassword !== '' && $confirmPassword !== $newPassword) {
+                return response()->json(['error' => 'Konfirmasi kata sandi baru tidak cocok.'], 422);
+            }
+            $user->password = Hash::make($newPassword);
+        }
+
+        if ($request->hasFile('photo')) {
+            $request->validate([
+                'photo' => [new FileRule()->types(['jpg', 'jpeg', 'png', 'webp'])->max('5mb')],
+            ]);
+            $file = $request->file('photo');
+            $extension = strtolower((string) $file->extension()) ?: 'jpg';
+            $filename = 'avatar_'.$user->id.'_'.Str::random(16).'.'.$extension;
+            $storedPath = $file->storeAs('avatars', $filename, 'public');
+            if (! is_string($storedPath)) {
+                return response()->json(['error' => 'Gagal menyimpan foto profil.'], 500);
+            }
+            $this->deleteOldStudentPhoto($user->photo_url);
+            $user->photo_url = '/storage/'.ltrim($storedPath, '/');
+        } elseif ($request->boolean('removePhoto')) {
+            $this->deleteOldStudentPhoto($user->photo_url);
+            $user->photo_url = null;
+        }
+
+        // Email is explicitly NOT updated (read-only for participant)
+        $user->name = $name;
+        $user->id_number = $idNumber !== '' ? $idNumber : null;
+        $user->phone_number = $phoneNumber !== '' ? $phoneNumber : null;
+        $user->institution = $institution !== '' ? $institution : null;
+        $user->save();
+
+        AuditLogger::record($request, 'student.profile_updated', [
+            'auditable_type' => User::class,
+            'auditable_id' => (string) $user->id,
+            'metadata' => [
+                'password_changed' => $newPassword !== '',
+                'photo_updated' => $request->hasFile('photo') || $request->boolean('removePhoto'),
+            ],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Profil berhasil diperbarui.',
+            'student' => $this->studentPayload($user->fresh()),
+        ]);
+    }
+
+    private function deleteOldStudentPhoto(?string $photoUrl): void
+    {
+        if (! $photoUrl) {
+            return;
+        }
+        $normalized = $this->normalizePublicAssetUrl($photoUrl);
+        if (str_starts_with($normalized, '/storage/avatars/')) {
+            $relativePath = substr($normalized, strlen('/storage/'));
+            $relativePath = explode('?', $relativePath)[0];
+            if ($relativePath !== '' && Storage::disk('public')->exists($relativePath)) {
+                Storage::disk('public')->delete($relativePath);
+            }
+        }
+    }
+
     public function schedules(Request $request): JsonResponse
     {
         $user = $request->user();
@@ -725,7 +827,16 @@ class ToeflApiController extends Controller
     /** @return array<string, mixed> */
     private function studentPayload(User $user): array
     {
-        return ['id' => $user->id, 'name' => $user->name, 'email' => $user->email, 'idNumber' => $user->id_number, 'phoneNumber' => $user->phone_number, 'institution' => $user->institution, 'createdAt' => $user->created_at];
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'idNumber' => $user->id_number,
+            'phoneNumber' => $user->phone_number,
+            'institution' => $user->institution,
+            'photoUrl' => $user->photo_url ? $this->normalizePublicAssetUrl((string) $user->photo_url) : null,
+            'createdAt' => $user->created_at,
+        ];
     }
 
     /** @return array<string, mixed> */

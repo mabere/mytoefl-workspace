@@ -34,6 +34,14 @@ import {
   Upload,
   Receipt,
   Image as ImageIcon,
+  Camera,
+  Pencil,
+  Eye,
+  EyeOff,
+  Trash2,
+  Building2,
+  Phone,
+  Save,
 } from "lucide-react";
 import { useExamStore } from "@/lib/examStore";
 
@@ -44,6 +52,7 @@ interface StudentProfile {
   idNumber: string | null;
   phoneNumber: string | null;
   institution: string | null;
+  photoUrl?: string | null;
 }
 
 interface RegistrationItem {
@@ -163,6 +172,27 @@ export default function StudentDashboardPage() {
   const [audioModalOpen, setAudioModalOpen] = useState(false);
   const [rulesModalOpen, setRulesModalOpen] = useState(false);
   const [confirmEnrollSchedule, setConfirmEnrollSchedule] = useState<AvailableSchedule | null>(null);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+
+  // Profile Edit states
+  const [profileForm, setProfileForm] = useState({
+    name: "",
+    idNumber: "",
+    phoneNumber: "",
+    institution: "",
+    currentPassword: "",
+    newPassword: "",
+    confirmPassword: "",
+  });
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoPreviewUrl, setPhotoPreviewUrl] = useState<string | null>(null);
+  const [removePhoto, setRemovePhoto] = useState(false);
+  const [isSavingProfile, setIsSavingProfile] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [profileSuccess, setProfileSuccess] = useState<string | null>(null);
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   // Payment states
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<"TRANSFER" | "CASH">("TRANSFER");
@@ -235,6 +265,120 @@ export default function StudentDashboardPage() {
       router.push("/login");
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const openProfileModal = () => {
+    if (!student) return;
+    setProfileForm({
+      name: student.name || "",
+      idNumber: student.idNumber || "",
+      phoneNumber: student.phoneNumber || "",
+      institution: student.institution || "",
+      currentPassword: "",
+      newPassword: "",
+      confirmPassword: "",
+    });
+    setPhotoFile(null);
+    setPhotoPreviewUrl(student.photoUrl ? appUrl(student.photoUrl) : null);
+    setRemovePhoto(false);
+    setProfileError(null);
+    setProfileSuccess(null);
+    setShowCurrentPassword(false);
+    setShowNewPassword(false);
+    setShowConfirmPassword(false);
+    setProfileModalOpen(true);
+  };
+
+  const handlePhotoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 5 * 1024 * 1024) {
+      setProfileError("Ukuran foto profil maksimal 5MB.");
+      return;
+    }
+    setProfileError(null);
+    setPhotoFile(file);
+    setRemovePhoto(false);
+    setPhotoPreviewUrl(URL.createObjectURL(file));
+  };
+
+  const handleSaveProfile = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setProfileError(null);
+    setProfileSuccess(null);
+
+    if (!profileForm.name.trim()) {
+      setProfileError("Nama lengkap wajib diisi.");
+      return;
+    }
+
+    if (profileForm.newPassword) {
+      if (!profileForm.currentPassword) {
+        setProfileError("Masukkan kata sandi saat ini untuk mengubah kata sandi.");
+        return;
+      }
+      if (profileForm.newPassword.length < 8) {
+        setProfileError("Kata sandi baru minimal 8 karakter.");
+        return;
+      }
+      if (profileForm.newPassword !== profileForm.confirmPassword) {
+        setProfileError("Konfirmasi kata sandi baru tidak cocok.");
+        return;
+      }
+    }
+
+    try {
+      setIsSavingProfile(true);
+      const formData = new FormData();
+      formData.append("name", profileForm.name.trim());
+      formData.append("idNumber", profileForm.idNumber.trim());
+      formData.append("phoneNumber", profileForm.phoneNumber.trim());
+      formData.append("institution", profileForm.institution.trim());
+
+      if (profileForm.newPassword) {
+        formData.append("currentPassword", profileForm.currentPassword);
+        formData.append("newPassword", profileForm.newPassword);
+        formData.append("confirmPassword", profileForm.confirmPassword);
+      }
+
+      if (photoFile) {
+        formData.append("photo", photoFile);
+      } else if (removePhoto) {
+        formData.append("removePhoto", "1");
+      }
+
+      const res = await fetch("/api/student/profile", {
+        method: "POST",
+        body: formData,
+      });
+
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const validationErrors = json.errors
+          ? Object.values(json.errors).flat().join(" ")
+          : null;
+        setProfileError(validationErrors || json.error || "Gagal menyimpan perubahan profil.");
+        return;
+      }
+
+      if (json.student) {
+        setStudent(json.student);
+      }
+      setProfileSuccess(json.message || "Profil berhasil diperbarui.");
+      setProfileForm((prev) => ({
+        ...prev,
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: "",
+      }));
+      setPhotoFile(null);
+      setRemovePhoto(false);
+    } catch (err) {
+      console.error(err);
+      setProfileError("Terjadi gangguan jaringan saat menyimpan profil.");
+    } finally {
+      setIsSavingProfile(false);
     }
   };
 
@@ -496,9 +640,25 @@ export default function StudentDashboardPage() {
         {/* Profile Card */}
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-blue-50 text-blue-700 border border-blue-200 flex items-center justify-center font-bold text-xl">
-              <User className="w-7 h-7" />
-            </div>
+            <button
+              type="button"
+              onClick={openProfileModal}
+              title="Ubah Foto & Profil Peserta"
+              className="group relative w-14 h-14 rounded-2xl bg-blue-50 text-blue-700 border border-blue-200 flex items-center justify-center font-bold text-xl overflow-hidden shrink-0"
+            >
+              {student.photoUrl ? (
+                <img
+                  src={appUrl(student.photoUrl)}
+                  alt={student.name}
+                  className="w-full h-full object-cover"
+                />
+              ) : (
+                <User className="w-7 h-7" />
+              )}
+              <span className="absolute inset-0 bg-slate-900/50 text-white opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
+                <Camera className="w-4 h-4" />
+              </span>
+            </button>
             <div>
               <div className="flex items-center gap-2">
                 <h2 className="text-lg font-bold text-slate-900 leading-tight">
@@ -516,11 +676,21 @@ export default function StudentDashboardPage() {
                 {student.phoneNumber && (
                   <span>• WA: <strong>{student.phoneNumber}</strong></span>
                 )}
+                {student.institution && (
+                  <span>• Institusi: <strong>{student.institution}</strong></span>
+                )}
               </div>
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={openProfileModal}
+              className="px-3.5 py-2 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition shadow-2xs"
+            >
+              <Pencil className="w-3.5 h-3.5 text-blue-600" />
+              <span>Edit Profil</span>
+            </button>
             <button
               onClick={() => setRulesModalOpen(true)}
               className="px-3.5 py-2 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition"
@@ -1619,6 +1789,286 @@ export default function StudentDashboardPage() {
                 >
                   <Upload className="w-3.5 h-3.5" />
                   <span>{isUploadingProof ? "Mengunggah..." : "Kirim Bukti Pembayaran"}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: EDIT PROFIL PESERTA */}
+      {profileModalOpen && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-lg w-full shadow-2xl border border-slate-200 space-y-5 my-8">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3.5">
+              <div>
+                <h3 className="text-base font-bold text-slate-900">
+                  Edit Profil Peserta
+                </h3>
+                <span className="text-[11px] text-slate-500">
+                  Perbarui foto profil, data diri sertifikat, dan kata sandi akun Anda
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProfileModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 p-1"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {profileError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs font-medium flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{profileError}</span>
+              </div>
+            )}
+
+            {profileSuccess && (
+              <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xl text-xs font-medium flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600" />
+                <span>{profileSuccess}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleSaveProfile} className="space-y-4">
+              {/* Foto Profil */}
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <div className="w-16 h-16 rounded-2xl bg-blue-100 text-blue-700 border border-blue-200 flex items-center justify-center overflow-hidden shrink-0">
+                    {photoPreviewUrl && !removePhoto ? (
+                      <img
+                        src={photoPreviewUrl}
+                        alt="Preview Foto Profil"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <User className="w-8 h-8" />
+                    )}
+                  </div>
+                  <div>
+                    <span className="text-xs font-bold text-slate-900 block">
+                      Foto Profil Peserta
+                    </span>
+                    <span className="text-[11px] text-slate-500 block mt-0.5">
+                      Format JPG, PNG, atau WEBP (Maks. 5MB)
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <label className="cursor-pointer inline-flex items-center gap-1.5 px-3 py-2 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold transition shadow-2xs">
+                    <Camera className="w-3.5 h-3.5" />
+                    <span>Pilih Foto</span>
+                    <input
+                      type="file"
+                      accept="image/jpeg,image/png,image/webp"
+                      onChange={handlePhotoSelect}
+                      className="hidden"
+                    />
+                  </label>
+                  {(photoPreviewUrl && !removePhoto) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPhotoFile(null);
+                        setPhotoPreviewUrl(null);
+                        setRemovePhoto(true);
+                      }}
+                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-slate-200 rounded-xl transition"
+                      title="Hapus Foto Profil"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Email (Disabled) */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Alamat Email Akun <span className="text-[10px] font-normal text-slate-400">(Tidak dapat diubah)</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type="email"
+                    value={student.email}
+                    disabled
+                    readOnly
+                    className="w-full pl-3.5 pr-9 py-2.5 rounded-xl border border-slate-200 bg-slate-100 text-slate-500 text-xs font-medium cursor-not-allowed select-none"
+                  />
+                  <Lock className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
+                </div>
+              </div>
+
+              {/* Data Diri */}
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nama Lengkap (Tercetak di Sertifikat) <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={profileForm.name}
+                    onChange={(e) =>
+                      setProfileForm({ ...profileForm, name: e.target.value })
+                    }
+                    placeholder="Masukkan nama lengkap resmi"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Nomor Identitas
+                    </label>
+                    <input
+                      type="text"
+                      value={profileForm.idNumber}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, idNumber: e.target.value })
+                      }
+                      placeholder="Nomor identitas resmi"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Nomor WhatsApp Aktif
+                    </label>
+                    <input
+                      type="text"
+                      value={profileForm.phoneNumber}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, phoneNumber: e.target.value })
+                      }
+                      placeholder="Contoh: 081234567890"
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs font-mono focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Asal Institusi / Kampus / Instansi
+                  </label>
+                  <input
+                    type="text"
+                    value={profileForm.institution}
+                    onChange={(e) =>
+                      setProfileForm({ ...profileForm, institution: e.target.value })
+                    }
+                    placeholder="Contoh: Universitas Indonesia / Umum"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Ubah Password (Opsional) */}
+              <div className="pt-3 border-t border-slate-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-slate-800">
+                    Ubah Kata Sandi (Opsional)
+                  </span>
+                  <span className="text-[10.5px] text-slate-400">
+                    Kosongkan jika tidak ingin mengubah
+                  </span>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                    Kata Sandi Saat Ini
+                  </label>
+                  <div className="relative">
+                    <input
+                      type={showCurrentPassword ? "text" : "password"}
+                      value={profileForm.currentPassword}
+                      onChange={(e) =>
+                        setProfileForm({ ...profileForm, currentPassword: e.target.value })
+                      }
+                      placeholder="Masukkan kata sandi lama"
+                      className="w-full pl-3.5 pr-9 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowCurrentPassword((v) => !v)}
+                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      {showCurrentPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Kata Sandi Baru (Min. 8 Karakter)
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showNewPassword ? "text" : "password"}
+                        value={profileForm.newPassword}
+                        onChange={(e) =>
+                          setProfileForm({ ...profileForm, newPassword: e.target.value })
+                        }
+                        placeholder="Kata sandi baru"
+                        className="w-full pl-3.5 pr-9 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowNewPassword((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        {showNewPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-semibold text-slate-600 mb-1">
+                      Konfirmasi Kata Sandi Baru
+                    </label>
+                    <div className="relative">
+                      <input
+                        type={showConfirmPassword ? "text" : "password"}
+                        value={profileForm.confirmPassword}
+                        onChange={(e) =>
+                          setProfileForm({ ...profileForm, confirmPassword: e.target.value })
+                        }
+                        placeholder="Ulangi kata sandi baru"
+                        className="w-full pl-3.5 pr-9 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowConfirmPassword((v) => !v)}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                      >
+                        {showConfirmPassword ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setProfileModalOpen(false)}
+                  className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs transition"
+                >
+                  Tutup
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingProfile}
+                  className="flex-1 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs shadow-md transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  <span>{isSavingProfile ? "Menyimpan..." : "Simpan Perubahan"}</span>
                 </button>
               </div>
             </form>

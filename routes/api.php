@@ -14,6 +14,7 @@ Route::middleware('web')->group(function () {
     Route::post('/auth/token', [ToeflApiController::class, 'tokenLogin'])->middleware('throttle:10,1');
 
     Route::get('/student/dashboard', [ToeflApiController::class, 'studentDashboard']);
+    Route::match(['get', 'put', 'post'], '/student/profile', [ToeflApiController::class, 'studentProfile']);
     Route::get('/student/schedules', [ToeflApiController::class, 'schedules']);
     Route::post('/student/enroll', [ToeflApiController::class, 'enroll']);
     Route::post('/student/payment-proof', [ToeflApiController::class, 'paymentProof']);
@@ -35,6 +36,7 @@ Route::middleware('web')->group(function () {
     Route::post('/admin/auth/login', [AdminApiController::class, 'login'])->middleware('throttle:6,1');
     Route::post('/admin/auth/logout', [AdminApiController::class, 'logout']);
     Route::get('/admin/auth/me', [AdminApiController::class, 'me']);
+    Route::match(['get', 'put', 'post'], '/admin/profile', [AdminApiController::class, 'adminProfile']);
     Route::get('/admin/sessions', [AdminApiController::class, 'sessions']);
     Route::get('/admin/backups', [AdminApiController::class, 'backups']);
     Route::post('/admin/backups', [AdminApiController::class, 'createBackup']);
@@ -48,6 +50,7 @@ Route::middleware('web')->group(function () {
     Route::get('/admin/packages/template-excel', [AdminApiController::class, 'templateExcel']);
     Route::get('/admin/packages/{packageId}/export', [AdminApiController::class, 'packageExport']);
     Route::get('/admin/packages/{packageId}/detail', [AdminApiController::class, 'packageDetail']);
+    Route::put('/admin/packages/{packageId}', [AdminApiController::class, 'updatePackage']);
     Route::put('/admin/packages/{packageId}/toggle', [AdminApiController::class, 'togglePackage']);
     Route::delete('/admin/packages/{packageId}', [AdminApiController::class, 'deletePackage']);
     Route::match(['get', 'post'], '/admin/tokens', [AdminApiController::class, 'tokens']);
@@ -56,13 +59,19 @@ Route::middleware('web')->group(function () {
     Route::patch('/admin/payments/{registrationId}', [AdminApiController::class, 'paymentAction']);
     Route::get('/admin/payments/{registrationId}/proof', [AdminApiController::class, 'paymentProof']);
     Route::match(['get', 'delete'], '/admin/leads', [AdminApiController::class, 'leads']);
+    Route::match(['get', 'post', 'put', 'delete'], '/admin/users', [AdminApiController::class, 'users']);
+    Route::match(['get', 'post', 'put', 'delete'], '/admin/admin-users', [AdminApiController::class, 'adminUsers']);
     Route::get('/admin/certificates', [AdminApiController::class, 'certificates']);
     Route::get('/admin/export/results', [AdminApiController::class, 'exportResults']);
     Route::get('/admin/export/leads', [AdminApiController::class, 'exportLeads']);
     Route::match(['get', 'put'], '/admin/settings', [AdminApiController::class, 'settings']);
     Route::match(['get', 'post'], '/admin/settings/institution', [AdminApiController::class, 'institutionSettings']);
     Route::post('/admin/settings/upload', [AdminApiController::class, 'uploadInstitutionAsset']);
+    Route::post('/admin/sections/{sectionId}/questions', [AdminApiController::class, 'createQuestion']);
     Route::put('/admin/questions/{questionId}', [AdminApiController::class, 'question']);
+    Route::delete('/admin/questions/{questionId}', [AdminApiController::class, 'deleteQuestion']);
+    Route::post('/admin/sections/{sectionId}/passages', [AdminApiController::class, 'createPassage']);
     Route::put('/admin/passages/{passageId}', [AdminApiController::class, 'passage']);
+    Route::delete('/admin/passages/{passageId}', [AdminApiController::class, 'deletePassage']);
     Route::post('/admin/upload-audio', [AdminApiController::class, 'uploadAudio']);
 });

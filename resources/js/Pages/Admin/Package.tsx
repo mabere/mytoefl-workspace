@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useEffect, useState, use } from "react";
+import React, { useEffect, useState } from "react";
 import { appFetch as fetch, appUrl } from "@/lib/appUrl";
-import { useRouter } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -19,6 +19,8 @@ import {
   Check,
   AlertCircle,
   FileEdit,
+  Plus,
+  Trash2,
 } from "lucide-react";
 import AudioSegmentEditor from "@/components/admin/AudioSegmentEditor";
 
@@ -64,11 +66,12 @@ interface PackageDetail {
 }
 
 export default function PackageEditorPage({
-  params,
+  packageId: propPackageId,
 }: {
-  params: Promise<{ packageId: string }>;
+  packageId?: string;
 }) {
-  const { packageId } = use(params);
+  const params = useParams();
+  const packageId = (propPackageId || params.packageId) as string;
   const router = useRouter();
 
   const [pkg, setPkg] = useState<PackageDetail | null>(null);
@@ -76,27 +79,160 @@ export default function PackageEditorPage({
   const [activeSection, setActiveSection] = useState<"LISTENING" | "STRUCTURE" | "READING">("LISTENING");
   const [saveStatus, setSaveStatus] = useState<Record<string, boolean>>({});
   const [isUploadingAudio, setIsUploadingAudio] = useState<Record<string, boolean>>({});
+  const [isAddingQuestion, setIsAddingQuestion] = useState(false);
+  const [isAddingPassage, setIsAddingPassage] = useState(false);
+
+  const loadPackage = async () => {
+    try {
+      setIsLoading(true);
+      const res = await fetch(`/api/admin/packages/${packageId}/detail`);
+      const json = await res.json();
+      if (json.package) {
+        setPkg(json.package);
+      } else {
+        alert(json.error || "Gagal memuat paket.");
+        router.push("/admin");
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function loadPackage() {
-      try {
-        setIsLoading(true);
-        const res = await fetch(`/api/admin/packages/${packageId}/detail`);
-        const json = await res.json();
-        if (json.package) {
-          setPkg(json.package);
-        } else {
-          alert(json.error || "Gagal memuat paket.");
-          router.push("/admin");
-        }
-      } catch (err) {
-        console.error(err);
-      } finally {
-        setIsLoading(false);
-      }
-    }
     loadPackage();
   }, [packageId, router]);
+
+  // Add new Question to current section
+  const handleAddQuestion = async (sectionId: string) => {
+    try {
+      setIsAddingQuestion(true);
+      const res = await fetch(`/api/admin/sections/${sectionId}/questions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || "Gagal menambahkan soal baru.");
+        return;
+      }
+      setPkg((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          sections: prev.sections.map((sec) =>
+            sec.id === sectionId
+              ? { ...sec, questions: [...sec.questions, json.question] }
+              : sec
+          ),
+        };
+      });
+    } catch (err) {
+      console.error(err);
+      alert("Terjadi kesalahan saat menambahkan soal.");
+    } finally {
+      setIsAddingQuestion(false);
+    }
+  };
+
+  // Delete Question
+  const handleDeleteQuestion = async (sectionId: string, q: QuestionItem) => {
+    if (!confirm(`Hapus Soal No. ${q.questionNumber} dari section ini?`)) return;
+    try {
+      const res = await fetch(`/api/admin/questions/${q.id}`, {
+        method: "DELETE",
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || "Gagal menghapus soal.");
+        return;
+      }
+      setPkg((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          sections: prev.sections.map((sec) =>
+            sec.id === sectionId
+              ? { ...sec, questions: sec.questions.filter((item) => item.id !== q.id) }
+              : sec
+          ),
+        };
+      });
+    } catch (err) {
+      console.error(err);
+      alert("Terjadi kesalahan saat menghapus soal.");
+    }
+  };
+
+  // Add new Passage to current section
+  const handleAddPassage = async (sectionId: string) => {
+    try {
+      setIsAddingPassage(true);
+      const res = await fetch(`/api/admin/sections/${sectionId}/passages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || "Gagal menambahkan passage baru.");
+        return;
+      }
+      setPkg((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          sections: prev.sections.map((sec) =>
+            sec.id === sectionId
+              ? { ...sec, passages: [...sec.passages, json.passage] }
+              : sec
+          ),
+        };
+      });
+    } catch (err) {
+      console.error(err);
+      alert("Terjadi kesalahan saat menambahkan passage.");
+    } finally {
+      setIsAddingPassage(false);
+    }
+  };
+
+  // Delete Passage
+  const handleDeletePassage = async (sectionId: string, p: PassageItem) => {
+    if (!confirm(`Hapus Passage #${p.orderIndex} ("${p.title || ""}")?`)) return;
+    try {
+      const res = await fetch(`/api/admin/passages/${p.id}`, {
+        method: "DELETE",
+      });
+      const json = await res.json();
+      if (!res.ok || !json.success) {
+        alert(json.error || "Gagal menghapus passage.");
+        return;
+      }
+      setPkg((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          sections: prev.sections.map((sec) =>
+            sec.id === sectionId
+              ? {
+                  ...sec,
+                  passages: sec.passages.filter((item) => item.id !== p.id),
+                  questions: sec.questions.map((q) =>
+                    q.passageId === p.id ? { ...q, passageId: null } : q
+                  ),
+                }
+              : sec
+          ),
+        };
+      });
+    } catch (err) {
+      console.error(err);
+      alert("Terjadi kesalahan saat menghapus passage.");
+    }
+  };
 
   // Handle Question update
   const handleSaveQuestion = async (q: QuestionItem) => {
@@ -312,41 +448,51 @@ export default function PackageEditorPage({
         </div>
 
         {/* SECTION SELECTOR TABS */}
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center gap-2 border-t border-slate-100">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 flex items-center gap-2 border-t border-slate-100 overflow-x-auto">
           <button
             onClick={() => setActiveSection("LISTENING")}
-            className={`py-3 px-4 text-xs font-bold border-b-2 transition flex items-center gap-2 ${
+            className={`py-3 px-4 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap ${
               activeSection === "LISTENING"
                 ? "border-blue-600 text-blue-700 bg-blue-50/50"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
             <Headphones className="w-4 h-4" />
-            <span>Section 1: Listening (50 Soal)</span>
+            <span>
+              Section 1: Listening (
+              {pkg.sections.find((s) => s.sectionType === "LISTENING")?.questions.length ?? 0} Soal)
+            </span>
           </button>
 
           <button
             onClick={() => setActiveSection("STRUCTURE")}
-            className={`py-3 px-4 text-xs font-bold border-b-2 transition flex items-center gap-2 ${
+            className={`py-3 px-4 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap ${
               activeSection === "STRUCTURE"
                 ? "border-blue-600 text-blue-700 bg-blue-50/50"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
             <BookOpen className="w-4 h-4" />
-            <span>Section 2: Structure (40 Soal)</span>
+            <span>
+              Section 2: Structure (
+              {pkg.sections.find((s) => s.sectionType === "STRUCTURE")?.questions.length ?? 0} Soal)
+            </span>
           </button>
 
           <button
             onClick={() => setActiveSection("READING")}
-            className={`py-3 px-4 text-xs font-bold border-b-2 transition flex items-center gap-2 ${
+            className={`py-3 px-4 text-xs font-bold border-b-2 transition flex items-center gap-2 whitespace-nowrap ${
               activeSection === "READING"
                 ? "border-blue-600 text-blue-700 bg-blue-50/50"
                 : "border-transparent text-slate-500 hover:text-slate-800"
             }`}
           >
             <FileText className="w-4 h-4" />
-            <span>Section 3: Reading (50 Soal • 5 Passage)</span>
+            <span>
+              Section 3: Reading (
+              {pkg.sections.find((s) => s.sectionType === "READING")?.questions.length ?? 0} Soal •{" "}
+              {pkg.sections.find((s) => s.sectionType === "READING")?.passages.length ?? 0} Passage)
+            </span>
           </button>
         </div>
       </header>
@@ -354,13 +500,30 @@ export default function PackageEditorPage({
       {/* MAIN EDITOR CONTENT */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-8 space-y-6">
         {/* PASSAGES FOR READING OR LISTENING PART B/C */}
-        {currentSec?.passages && currentSec.passages.length > 0 && (
+        {currentSec && (currentSec.sectionType === "READING" || currentSec.sectionType === "LISTENING") && (
           <div className="space-y-4">
-            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-600 flex items-center gap-2">
-              <FileEdit className="w-4 h-4 text-blue-600" />
-              <span>Naskah Bacaan / Passage ({currentSec.passages.length} Teks)</span>
-            </h2>
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-sm font-bold uppercase tracking-wider text-slate-600 flex items-center gap-2">
+                <FileEdit className="w-4 h-4 text-blue-600" />
+                <span>
+                  {currentSec.sectionType === "LISTENING"
+                    ? `Passage Percakapan / Monolog Part B & C (${currentSec.passages.length} Passage)`
+                    : `Naskah Bacaan / Reading Passage (${currentSec.passages.length} Teks)`}
+                </span>
+              </h2>
 
+              <button
+                type="button"
+                onClick={() => handleAddPassage(currentSec.id)}
+                disabled={isAddingPassage}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-white hover:bg-blue-50 text-blue-700 border border-blue-200 rounded-xl text-xs font-bold shadow-xs transition disabled:opacity-50"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{isAddingPassage ? "Menambahkan..." : "Tambah Passage Baru"}</span>
+              </button>
+            </div>
+
+            {currentSec.passages.length > 0 && (
             <div className="grid grid-cols-1 gap-4">
               {currentSec.passages.map((p) => (
                 <div
@@ -371,22 +534,32 @@ export default function PackageEditorPage({
                     <span className="text-xs font-bold text-blue-800 bg-blue-50 px-2.5 py-1 rounded-md">
                       Passage #{p.orderIndex}
                     </span>
-                    <button
-                      onClick={() => handleSavePassage(p)}
-                      className="flex items-center gap-1 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition shadow-xs"
-                    >
-                      {saveStatus[p.id] ? (
-                        <>
-                          <Check className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Tersimpan!</span>
-                        </>
-                      ) : (
-                        <>
-                          <Save className="w-3.5 h-3.5" />
-                          <span>Simpan Passage</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleDeletePassage(currentSec.id, p)}
+                        className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition"
+                        title="Hapus Passage"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => handleSavePassage(p)}
+                        className="flex items-center gap-1 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                      >
+                        {saveStatus[p.id] ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Tersimpan!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Save className="w-3.5 h-3.5" />
+                            <span>Simpan Passage</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   <div>
@@ -433,15 +606,30 @@ export default function PackageEditorPage({
                 </div>
               ))}
             </div>
+            )}
           </div>
         )}
 
         {/* QUESTIONS LIST */}
         <div className="space-y-4">
-          <h2 className="text-sm font-bold uppercase tracking-wider text-slate-600 flex items-center gap-2">
-            <BookOpen className="w-4 h-4 text-blue-600" />
-            <span>Daftar Pertanyaan ({currentSec?.questions.length ?? 0} Soal)</span>
-          </h2>
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-bold uppercase tracking-wider text-slate-600 flex items-center gap-2">
+              <BookOpen className="w-4 h-4 text-blue-600" />
+              <span>Daftar Pertanyaan ({currentSec?.questions.length ?? 0} Soal)</span>
+            </h2>
+
+            {currentSec && (
+              <button
+                type="button"
+                onClick={() => handleAddQuestion(currentSec.id)}
+                disabled={isAddingQuestion}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold shadow-xs transition disabled:opacity-50"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{isAddingQuestion ? "Menambahkan..." : "Tambah Soal Baru"}</span>
+              </button>
+            )}
+          </div>
 
           <div className="space-y-4">
             {currentSec?.questions.map((q) => (
@@ -450,32 +638,94 @@ export default function PackageEditorPage({
                 className="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs space-y-4 hover:border-slate-300 transition"
               >
                 {/* Question Header & Save Button */}
-                <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-                  <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-3">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="font-bold text-sm text-slate-900">
                       Soal No. {q.questionNumber}
                     </span>
-                    <span className="text-[10px] font-semibold bg-slate-100 text-slate-700 px-2 py-0.5 rounded border">
-                      {q.partType || "STANDARD"}
-                    </span>
+
+                    {/* Part Type Selector */}
+                    <select
+                      value={q.partType || (activeSection === "LISTENING" ? "PART_A" : activeSection)}
+                      onChange={(e) =>
+                        updateQuestionField(currentSec.sectionType, q.id, "partType", e.target.value)
+                      }
+                      className="text-[11px] font-semibold bg-slate-100 text-slate-700 px-2 py-1 rounded-lg border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {activeSection === "LISTENING" && (
+                        <>
+                          <option value="PART_A">PART_A (Short Dialogue)</option>
+                          <option value="PART_B">PART_B (Long Conversation)</option>
+                          <option value="PART_C">PART_C (Academic Talk)</option>
+                        </>
+                      )}
+                      {activeSection === "STRUCTURE" && (
+                        <>
+                          <option value="STRUCTURE">STRUCTURE (Melengkapi Kalimat)</option>
+                          <option value="WRITTEN_EXPRESSION">WRITTEN_EXPRESSION (Kata Bergaris Bawah)</option>
+                        </>
+                      )}
+                      {activeSection === "READING" && (
+                        <option value="READING">READING COMPREHENSION</option>
+                      )}
+                    </select>
+
+                    {/* Passage Link Selector for Reading or Listening Part B/C */}
+                    {currentSec.passages.length > 0 && (
+                      <select
+                        value={q.passageId || ""}
+                        onChange={(e) =>
+                          updateQuestionField(
+                            currentSec.sectionType,
+                            q.id,
+                            "passageId",
+                            e.target.value || null
+                          )
+                        }
+                        className="text-[11px] font-semibold bg-blue-50 text-blue-700 px-2 py-1 rounded-lg border border-blue-200 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="">-- Tanpa Passage --</option>
+                        {currentSec.passages.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            Passage #{p.orderIndex}: {p.title || `Passage ${p.orderIndex}`}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                   </div>
 
-                  <button
-                    onClick={() => handleSaveQuestion(q)}
-                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
-                  >
-                    {saveStatus[q.id] ? (
-                      <>
-                        <Check className="w-3.5 h-3.5 text-emerald-300" />
-                        <span>Tersimpan!</span>
-                      </>
-                    ) : (
-                      <>
-                        <Save className="w-3.5 h-3.5" />
-                        <span>Simpan Soal</span>
-                      </>
-                    )}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteQuestion(currentSec.id, q)}
+                      disabled={currentSec.questions.length <= 1}
+                      className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition disabled:opacity-30 disabled:cursor-not-allowed"
+                      title={
+                        currentSec.questions.length <= 1
+                          ? "Minimal harus ada 1 soal pada setiap section"
+                          : "Hapus Soal"
+                      }
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      onClick={() => handleSaveQuestion(q)}
+                      className="flex items-center gap-1.5 px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-bold transition shadow-xs"
+                    >
+                      {saveStatus[q.id] ? (
+                        <>
+                          <Check className="w-3.5 h-3.5 text-emerald-300" />
+                          <span>Tersimpan!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Save className="w-3.5 h-3.5" />
+                          <span>Simpan Soal</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Question Text / Script */}

@@ -15,6 +15,7 @@ use App\Models\Passage;
 use App\Models\Question;
 use App\Models\Section;
 use App\Models\SystemSetting;
+use App\Models\User;
 use App\Services\DatabaseBackupService;
 use App\Support\AuditLogger;
 use DateTimeZone;
@@ -48,7 +49,10 @@ class AdminApiController extends Controller
 
     public function login(Request $request): JsonResponse
     {
-        $admin = AdminUser::where('username', trim((string) $request->input('username')))->first();
+        $login = trim((string) ($request->input('username') ?: $request->input('email')));
+        $admin = AdminUser::where('username', $login)
+            ->orWhere('email', $login)
+            ->first();
         if (! $admin || ! Hash::check((string) $request->input('password'), $admin->password)) {
             return response()->json(['error' => 'Username atau password salah.'], 401);
         }
@@ -70,6 +74,120 @@ class AdminApiController extends Controller
         $admin = $this->admin($request);
 
         return $admin ? response()->json(['authenticated' => true, 'admin' => $this->adminPayload($admin)]) : response()->json(['authenticated' => false], 401);
+    }
+
+    public function adminProfile(Request $request): JsonResponse
+    {
+        $currentAdmin = $this->admin($request);
+        if (! $currentAdmin) {
+            return $this->unauthorized();
+        }
+
+        if ($request->isMethod('get')) {
+            return response()->json([
+                'success' => true,
+                'admin' => $this->adminPayload($currentAdmin),
+            ]);
+        }
+
+        $name = trim((string) $request->input('name', $currentAdmin->name));
+        $username = trim((string) $request->input('username', $currentAdmin->username));
+        $rawEmail = $request->input('email');
+        $email = $rawEmail !== null ? trim((string) $rawEmail) : $currentAdmin->email;
+        $email = $email !== '' ? strtolower($email) : null;
+
+        if ($name === '' || mb_strlen($name) > 120) {
+            return response()->json(['error' => 'Nama lengkap wajib diisi (maksimal 120 karakter).'], 422);
+        }
+
+        if ($username === '' || mb_strlen($username) < 3 || mb_strlen($username) > 60 || ! preg_match('/^[a-zA-Z0-9._@-]+$/', $username)) {
+            return response()->json(['error' => 'Username wajib diisi (3-60 karakter, huruf/angka/titik/underscore/@).'], 422);
+        }
+
+        if (AdminUser::where('username', $username)->whereKeyNot($currentAdmin->id)->exists()) {
+            return response()->json(['error' => 'Username tersebut sudah digunakan oleh administrator lain.'], 409);
+        }
+
+        if ($email !== null) {
+            if (! filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190) {
+                return response()->json(['error' => 'Format email administrator tidak valid.'], 422);
+            }
+            if (AdminUser::where('email', $email)->whereKeyNot($currentAdmin->id)->exists()) {
+                return response()->json(['error' => 'Alamat email tersebut sudah digunakan oleh administrator lain.'], 409);
+            }
+        }
+
+        $newPassword = (string) $request->input('newPassword', '');
+        $currentPassword = (string) $request->input('currentPassword', '');
+        $confirmPassword = (string) $request->input('confirmPassword', '');
+
+        if ($newPassword !== '') {
+            if ($currentPassword === '' || ! Hash::check($currentPassword, $currentAdmin->password)) {
+                return response()->json(['error' => 'Kata sandi saat ini tidak sesuai.'], 422);
+            }
+            if (mb_strlen($newPassword) < 8 || mb_strlen($newPassword) > 128) {
+                return response()->json(['error' => 'Kata sandi baru minimal 8 karakter.'], 422);
+            }
+            if ($confirmPassword !== '' && $confirmPassword !== $newPassword) {
+                return response()->json(['error' => 'Konfirmasi kata sandi baru tidak cocok.'], 422);
+            }
+            $currentAdmin->password = Hash::make($newPassword);
+        }
+
+        if ($request->hasFile('photo')) {
+            $request->validate([
+                'photo' => [new FileRule()->types(['jpg', 'jpeg', 'png', 'webp'])->max('5mb')],
+            ]);
+            $file = $request->file('photo');
+            $extension = strtolower((string) $file->extension()) ?: 'jpg';
+            $filename = 'admin_avatar_'.$currentAdmin->id.'_'.Str::random(16).'.'.$extension;
+            $storedPath = $file->storeAs('avatars', $filename, 'public');
+            if (! is_string($storedPath)) {
+                return response()->json(['error' => 'Gagal menyimpan foto profil administrator.'], 500);
+            }
+            $this->deleteOldAdminPhoto($currentAdmin->photo_url);
+            $currentAdmin->photo_url = '/storage/'.ltrim($storedPath, '/');
+        } elseif ($request->boolean('removePhoto')) {
+            $this->deleteOldAdminPhoto($currentAdmin->photo_url);
+            $currentAdmin->photo_url = null;
+        }
+
+        $currentAdmin->name = $name;
+        $currentAdmin->username = $username;
+        $currentAdmin->email = $email;
+        $currentAdmin->save();
+
+        AuditLogger::record($request, 'admin.profile_updated', [
+            'auditable_type' => AdminUser::class,
+            'auditable_id' => $currentAdmin->id,
+            'metadata' => [
+                'username' => $username,
+                'email' => $email,
+                'password_changed' => $newPassword !== '',
+                'photo_updated' => $request->hasFile('photo') || $request->boolean('removePhoto'),
+            ],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Profil administrator berhasil diperbarui.',
+            'admin' => $this->adminPayload($currentAdmin->fresh()),
+        ]);
+    }
+
+    private function deleteOldAdminPhoto(?string $photoUrl): void
+    {
+        if (! $photoUrl) {
+            return;
+        }
+        $normalized = $this->normalizePublicAssetUrl($photoUrl);
+        if (str_starts_with($normalized, '/storage/avatars/')) {
+            $relativePath = substr($normalized, strlen('/storage/'));
+            $relativePath = explode('?', $relativePath)[0];
+            if ($relativePath !== '' && Storage::disk('public')->exists($relativePath)) {
+                Storage::disk('public')->delete($relativePath);
+            }
+        }
     }
 
     public function sessions(Request $request): JsonResponse
@@ -260,15 +378,25 @@ class AdminApiController extends Controller
             return response()->json(['error' => 'Kode paket sudah terdaftar.'], 400);
         }
         $raw = $body['rawJson'] ?? null;
+        if (! is_array($raw) && $request->boolean('isManual')) {
+            $preset = strtoupper(trim((string) ($body['preset'] ?? 'FULL_140')));
+            $raw = $this->buildManualPackageSkeleton(
+                $title,
+                $code,
+                isset($body['description']) ? trim((string) $body['description']) : null,
+                in_array($preset, ['FULL_140', 'MINIMAL'], true) ? $preset : 'FULL_140'
+            );
+        }
         if (! is_array($raw)) {
             return response()->json(['error' => 'Paket harus menyertakan struktur rawJson hasil validasi import.'], 422);
         }
         if ($validationError = $this->validatePackageDefinition($raw)) {
             return response()->json(['error' => $validationError], 422);
         }
+        $isActive = array_key_exists('isActive', $body) ? (bool) $body['isActive'] : true;
         $rawSections = $this->packageSections($raw['sections'] ?? null);
-        $package = DB::transaction(function () use ($code, $title, $body, $raw, $rawSections) {
-            $package = ExamPackage::create(['code' => $code, 'title' => $raw['title'] ?? $title, 'description' => $raw['description'] ?? ($body['description'] ?? null), 'is_active' => true]);
+        $package = DB::transaction(function () use ($code, $title, $body, $raw, $rawSections, $isActive) {
+            $package = ExamPackage::create(['code' => $code, 'title' => $raw['title'] ?? $title, 'description' => $raw['description'] ?? ($body['description'] ?? null), 'is_active' => $isActive]);
             $definitions = [['LISTENING', 'Section 1: Listening Comprehension', 35, 1], ['STRUCTURE', 'Section 2: Structure & Written Expression', 25, 2], ['READING', 'Section 3: Reading Comprehension', 55, 3]];
             foreach ($definitions as [$type, $sectionTitle, $duration, $order]) {
                 $section = $package->sections()->create(['section_type' => $type, 'title' => $sectionTitle, 'duration_minutes' => $duration, 'order_index' => $order]);
@@ -288,7 +416,7 @@ class AdminApiController extends Controller
 
             return $package;
         });
-        AuditLogger::record($request, 'package.created', ['auditable_type' => ExamPackage::class, 'auditable_id' => $package->id, 'metadata' => ['code' => $package->code]]);
+        AuditLogger::record($request, 'package.created', ['auditable_type' => ExamPackage::class, 'auditable_id' => $package->id, 'metadata' => ['code' => $package->code, 'manual' => $request->boolean('isManual')]]);
 
         return response()->json(['success' => true, 'message' => 'Paket ujian berhasil dibuat.', 'packageId' => $package->id]);
     }
@@ -298,9 +426,51 @@ class AdminApiController extends Controller
         if (! $this->admin($request)) {
             return $this->unauthorized();
         }
-        $package = ExamPackage::with(['sections.passages', 'sections.questions'])->find($packageId);
+        $package = ExamPackage::with([
+            'sections' => fn ($q) => $q->orderBy('order_index'),
+            'sections.passages' => fn ($q) => $q->orderBy('order_index'),
+            'sections.questions' => fn ($q) => $q->orderBy('question_number'),
+        ])->find($packageId);
 
         return $package ? response()->json(['package' => $this->camelize($package->toArray())]) : response()->json(['error' => 'Paket ujian tidak ditemukan.'], 404);
+    }
+
+    public function updatePackage(Request $request, string $packageId): JsonResponse
+    {
+        if (! $this->admin($request)) {
+            return $this->unauthorized();
+        }
+        $package = ExamPackage::find($packageId);
+        if (! $package) {
+            return response()->json(['error' => 'Paket ujian tidak ditemukan.'], 404);
+        }
+        $title = trim((string) $request->input('title', $package->title));
+        $code = strtoupper(trim((string) $request->input('code', $package->code)));
+        $description = $request->has('description') ? (trim((string) $request->input('description')) ?: null) : $package->description;
+
+        if ($title === '') {
+            return response()->json(['error' => 'Judul paket wajib diisi.'], 422);
+        }
+        if ($code === '') {
+            return response()->json(['error' => 'Kode paket wajib diisi.'], 422);
+        }
+        if (ExamPackage::where('code', $code)->whereKeyNot($package->id)->exists()) {
+            return response()->json(['error' => 'Kode paket tersebut sudah digunakan oleh paket lain.'], 409);
+        }
+
+        $package->update([
+            'title' => $title,
+            'code' => $code,
+            'description' => $description,
+        ]);
+
+        AuditLogger::record($request, 'package.updated', [
+            'auditable_type' => ExamPackage::class,
+            'auditable_id' => $package->id,
+            'metadata' => ['code' => $package->code],
+        ]);
+
+        return response()->json(['success' => true, 'package' => $this->camelize($package->fresh()->toArray())]);
     }
 
     public function deletePackage(Request $request, string $packageId): JsonResponse
@@ -525,6 +695,320 @@ class AdminApiController extends Controller
         return response()->json(['success' => true, 'summary' => ['totalLeads' => DemoLead::count(), 'completedCount' => $completedCount, 'inProgressCount' => DemoLead::where('status', 'IN_PROGRESS')->count(), 'withPhoneCount' => DemoLead::whereNotNull('phone_number')->count(), 'averageScore' => $completedCount ? (int) round((float) DemoLead::where('status', 'COMPLETED')->avg('total_score')) : 0], 'leads' => $this->camelize($leads->toArray()), 'limit' => $limit]);
     }
 
+    public function users(Request $request): JsonResponse
+    {
+        if (! $this->admin($request)) {
+            return $this->unauthorized();
+        }
+
+        if ($request->isMethod('get')) {
+            $query = User::withCount(['registrations', 'examSessions', 'certificates'])->latest();
+            if ($search = trim((string) $request->query('search'))) {
+                $query->where(function ($q) use ($search): void {
+                    $q->where('name', 'like', "%{$search}%")
+                        ->orWhere('email', 'like', "%{$search}%")
+                        ->orWhere('id_number', 'like', "%{$search}%")
+                        ->orWhere('phone_number', 'like', "%{$search}%")
+                        ->orWhere('institution', 'like', "%{$search}%");
+                });
+            }
+            $limit = min(max((int) $request->query('limit', 200), 1), 500);
+            $users = $query->limit($limit)->get();
+
+            return response()->json([
+                'success' => true,
+                'summary' => [
+                    'totalUsers' => User::count(),
+                    'withExamCount' => User::has('examSessions')->count(),
+                    'withCertificateCount' => User::has('certificates')->count(),
+                ],
+                'users' => $users->map(fn (User $user): array => $this->userPayload($user))->values()->all(),
+                'limit' => $limit,
+            ]);
+        }
+
+        if ($request->isMethod('delete')) {
+            $user = User::whereKey($request->query('id'))->first();
+            if (! $user) {
+                return response()->json(['error' => 'Peserta tidak ditemukan.'], 404);
+            }
+            if (
+                $user->examSessions()->exists()
+                || $user->certificates()->exists()
+                || $user->registrations()->whereIn('status', ['CONFIRMED', 'COMPLETED'])->exists()
+            ) {
+                return response()->json([
+                    'error' => 'Peserta memiliki riwayat ujian, pembayaran terkonfirmasi, atau sertifikat sehingga tidak dapat dihapus.',
+                ], 409);
+            }
+
+            $userId = (string) $user->id;
+            $email = $user->email;
+            DB::transaction(function () use ($user): void {
+                $user->registrations()->delete();
+                $user->delete();
+            });
+            AuditLogger::record($request, 'user.deleted', [
+                'auditable_type' => User::class,
+                'auditable_id' => $userId,
+                'metadata' => ['email' => $email],
+            ]);
+
+            return response()->json(['success' => true]);
+        }
+
+        if ($request->isMethod('put')) {
+            $user = User::whereKey($request->input('id'))->first();
+            if (! $user) {
+                return response()->json(['error' => 'Peserta tidak ditemukan.'], 404);
+            }
+
+            $name = trim((string) $request->input('name'));
+            $email = strtolower(trim((string) $request->input('email')));
+            $password = (string) $request->input('password', '');
+            $idNumber = trim((string) $request->input('idNumber')) ?: null;
+            $phoneNumber = trim((string) $request->input('phoneNumber')) ?: null;
+            $institution = trim((string) $request->input('institution')) ?: null;
+
+            if ($name === '' || mb_strlen($name) > 120) {
+                return response()->json(['error' => 'Nama lengkap peserta wajib diisi (maks. 120 karakter).'], 422);
+            }
+            if (! filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190) {
+                return response()->json(['error' => 'Format alamat email tidak valid.'], 422);
+            }
+            if (User::where('email', $email)->whereKeyNot($user->id)->exists()) {
+                return response()->json(['error' => 'Email tersebut sudah digunakan oleh peserta lain.'], 409);
+            }
+            if ($password !== '' && (mb_strlen($password) < 8 || mb_strlen($password) > 128)) {
+                return response()->json(['error' => 'Password baru minimal 8 karakter.'], 422);
+            }
+
+            $syncCertificates = $request->boolean('syncCertificates', true);
+
+            DB::transaction(function () use ($user, $name, $email, $password, $idNumber, $phoneNumber, $institution, $syncCertificates): void {
+                $updates = [
+                    'name' => $name,
+                    'email' => $email,
+                    'id_number' => $idNumber,
+                    'phone_number' => $phoneNumber,
+                    'institution' => $institution,
+                ];
+                if ($password !== '') {
+                    $updates['password'] = Hash::make($password);
+                }
+                $user->update($updates);
+
+                if ($syncCertificates) {
+                    ExamSession::where('user_id', $user->id)->update(['participant_name' => $name]);
+                    Certificate::where('user_id', $user->id)->update([
+                        'participant_name' => $name,
+                        'id_number' => $idNumber,
+                    ]);
+                }
+            });
+
+            AuditLogger::record($request, 'user.updated', [
+                'auditable_type' => User::class,
+                'auditable_id' => (string) $user->id,
+                'metadata' => [
+                    'email' => $email,
+                    'password_reset' => $password !== '',
+                    'synced_certificates' => $syncCertificates,
+                ],
+            ]);
+
+            $fresh = User::withCount(['registrations', 'examSessions', 'certificates'])->whereKey($user->id)->firstOrFail();
+
+            return response()->json(['success' => true, 'user' => $this->userPayload($fresh)]);
+        }
+
+        // POST: Create new participant user
+        $name = trim((string) $request->input('name'));
+        $email = strtolower(trim((string) $request->input('email')));
+        $password = (string) $request->input('password', '');
+        $idNumber = trim((string) $request->input('idNumber')) ?: null;
+        $phoneNumber = trim((string) $request->input('phoneNumber')) ?: null;
+        $institution = trim((string) $request->input('institution')) ?: null;
+
+        if ($name === '' || mb_strlen($name) > 120) {
+            return response()->json(['error' => 'Nama lengkap peserta wajib diisi (maks. 120 karakter).'], 422);
+        }
+        if (! filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190) {
+            return response()->json(['error' => 'Format alamat email tidak valid.'], 422);
+        }
+        if (User::where('email', $email)->exists()) {
+            return response()->json(['error' => 'Email tersebut sudah terdaftar.'], 409);
+        }
+        if (mb_strlen($password) < 8 || mb_strlen($password) > 128) {
+            return response()->json(['error' => 'Password peserta minimal 8 karakter.'], 422);
+        }
+
+        $user = User::create([
+            'name' => $name,
+            'email' => $email,
+            'password' => Hash::make($password),
+            'id_number' => $idNumber,
+            'phone_number' => $phoneNumber,
+            'institution' => $institution,
+        ]);
+
+        AuditLogger::record($request, 'user.created', [
+            'auditable_type' => User::class,
+            'auditable_id' => (string) $user->id,
+            'metadata' => ['email' => $user->email],
+        ]);
+
+        $fresh = User::withCount(['registrations', 'examSessions', 'certificates'])->whereKey($user->id)->firstOrFail();
+
+        return response()->json(['success' => true, 'user' => $this->userPayload($fresh)], 201);
+    }
+
+    public function adminUsers(Request $request): JsonResponse
+    {
+        $currentAdmin = $this->admin($request);
+        if (! $currentAdmin) {
+            return $this->unauthorized();
+        }
+
+        if ($request->isMethod('get')) {
+            $admins = AdminUser::orderBy('created_at')->get()->map(fn (AdminUser $admin): array => [
+                ...$this->adminPayload($admin),
+                'isCurrent' => $admin->id === $currentAdmin->id,
+            ])->values()->all();
+
+            return response()->json(['success' => true, 'admins' => $admins]);
+        }
+
+        if ($request->isMethod('delete')) {
+            $targetAdmin = AdminUser::whereKey($request->query('id'))->first();
+            if (! $targetAdmin) {
+                return response()->json(['error' => 'Akun administrator tidak ditemukan.'], 404);
+            }
+            if ($targetAdmin->id === $currentAdmin->id) {
+                return response()->json(['error' => 'Tidak dapat menghapus akun administrator yang sedang Anda gunakan.'], 409);
+            }
+            if (AdminUser::count() <= 1) {
+                return response()->json(['error' => 'Minimal harus tersisa satu akun administrator aktif.'], 409);
+            }
+
+            $deletedId = $targetAdmin->id;
+            $deletedUsername = $targetAdmin->username;
+            $targetAdmin->delete();
+
+            AuditLogger::record($request, 'admin_user.deleted', [
+                'auditable_type' => AdminUser::class,
+                'auditable_id' => $deletedId,
+                'metadata' => ['username' => $deletedUsername],
+            ]);
+
+            return response()->json(['success' => true]);
+        }
+
+        if ($request->isMethod('put')) {
+            $targetAdmin = AdminUser::whereKey($request->input('id'))->first();
+            if (! $targetAdmin) {
+                return response()->json(['error' => 'Akun administrator tidak ditemukan.'], 404);
+            }
+
+            $username = trim((string) $request->input('username'));
+            $name = trim((string) $request->input('name'));
+            $rawEmail = $request->input('email');
+            $email = $rawEmail !== null ? trim((string) $rawEmail) : $targetAdmin->email;
+            $email = $email !== '' ? strtolower($email) : null;
+            $password = (string) $request->input('password', '');
+
+            if ($username === '' || mb_strlen($username) < 3 || mb_strlen($username) > 60 || ! preg_match('/^[a-zA-Z0-9._@-]+$/', $username)) {
+                return response()->json(['error' => 'Username wajib diisi (3-60 karakter, huruf/angka/titik/underscore/@).'], 422);
+            }
+            if ($name === '' || mb_strlen($name) > 120) {
+                return response()->json(['error' => 'Nama lengkap administrator wajib diisi.'], 422);
+            }
+            if (AdminUser::where('username', $username)->whereKeyNot($targetAdmin->id)->exists()) {
+                return response()->json(['error' => 'Username tersebut sudah digunakan oleh administrator lain.'], 409);
+            }
+            if ($email !== null) {
+                if (! filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190) {
+                    return response()->json(['error' => 'Format email administrator tidak valid.'], 422);
+                }
+                if (AdminUser::where('email', $email)->whereKeyNot($targetAdmin->id)->exists()) {
+                    return response()->json(['error' => 'Alamat email tersebut sudah digunakan oleh administrator lain.'], 409);
+                }
+            }
+            if ($password !== '' && (mb_strlen($password) < 8 || mb_strlen($password) > 128)) {
+                return response()->json(['error' => 'Password baru minimal 8 karakter.'], 422);
+            }
+
+            $updates = ['username' => $username, 'name' => $name, 'email' => $email];
+            if ($password !== '') {
+                $updates['password'] = Hash::make($password);
+            }
+            $targetAdmin->update($updates);
+
+            AuditLogger::record($request, 'admin_user.updated', [
+                'auditable_type' => AdminUser::class,
+                'auditable_id' => $targetAdmin->id,
+                'metadata' => ['username' => $username, 'email' => $email, 'password_changed' => $password !== ''],
+            ]);
+
+            return response()->json([
+                'success' => true,
+                'admin' => [
+                    ...$this->adminPayload($targetAdmin->fresh()),
+                    'isCurrent' => $targetAdmin->id === $currentAdmin->id,
+                ],
+            ]);
+        }
+
+        // POST: Create new admin user
+        $username = trim((string) $request->input('username'));
+        $name = trim((string) $request->input('name'));
+        $rawEmail = $request->input('email');
+        $email = $rawEmail !== null && trim((string) $rawEmail) !== '' ? strtolower(trim((string) $rawEmail)) : null;
+        $password = (string) $request->input('password', '');
+
+        if ($username === '' || mb_strlen($username) < 3 || mb_strlen($username) > 60 || ! preg_match('/^[a-zA-Z0-9._@-]+$/', $username)) {
+            return response()->json(['error' => 'Username wajib diisi (3-60 karakter, huruf/angka/titik/underscore/@).'], 422);
+        }
+        if ($name === '' || mb_strlen($name) > 120) {
+            return response()->json(['error' => 'Nama lengkap administrator wajib diisi.'], 422);
+        }
+        if (AdminUser::where('username', $username)->exists()) {
+            return response()->json(['error' => 'Username administrator tersebut sudah terdaftar.'], 409);
+        }
+        if ($email !== null) {
+            if (! filter_var($email, FILTER_VALIDATE_EMAIL) || mb_strlen($email) > 190) {
+                return response()->json(['error' => 'Format email administrator tidak valid.'], 422);
+            }
+            if (AdminUser::where('email', $email)->exists()) {
+                return response()->json(['error' => 'Alamat email administrator tersebut sudah terdaftar.'], 409);
+            }
+        }
+        if (mb_strlen($password) < 8 || mb_strlen($password) > 128) {
+            return response()->json(['error' => 'Password administrator minimal 8 karakter.'], 422);
+        }
+
+        $newAdmin = AdminUser::create([
+            'username' => $username,
+            'name' => $name,
+            'email' => $email,
+            'password' => Hash::make($password),
+        ]);
+
+        AuditLogger::record($request, 'admin_user.created', [
+            'auditable_type' => AdminUser::class,
+            'auditable_id' => $newAdmin->id,
+            'metadata' => ['username' => $newAdmin->username, 'email' => $email],
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'admin' => [
+                ...$this->adminPayload($newAdmin),
+                'isCurrent' => false,
+            ],
+        ], 201);
+    }
+
     public function certificates(Request $request): JsonResponse
     {
         if (! $this->admin($request)) {
@@ -699,6 +1183,54 @@ class AdminApiController extends Controller
         return $value;
     }
 
+    public function createQuestion(Request $request, string $sectionId): JsonResponse
+    {
+        if (! $this->admin($request)) {
+            return $this->unauthorized();
+        }
+        $section = Section::find($sectionId);
+        if (! $section) {
+            return response()->json(['error' => 'Section tidak ditemukan.'], 404);
+        }
+        if (ExamSession::where('package_id', $section->package_id)->where('status', 'IN_PROGRESS')->exists()) {
+            return response()->json(['error' => 'Paket sedang digunakan oleh peserta aktif dan tidak dapat diubah.'], 409);
+        }
+
+        $nextNumber = (int) $section->questions()->max('question_number') + 1;
+        $defaultPartType = match ($section->section_type) {
+            'LISTENING' => $nextNumber <= 30 ? 'PART_A' : ($nextNumber <= 38 ? 'PART_B' : 'PART_C'),
+            'STRUCTURE' => $nextNumber <= 15 ? 'STRUCTURE' : 'WRITTEN_EXPRESSION',
+            default => 'READING',
+        };
+        $defaultText = match ($defaultPartType) {
+            'WRITTEN_EXPRESSION' => 'The {A:students} {B:was} {C:studying} in the {D:library}.',
+            'LISTENING', 'PART_A', 'PART_B', 'PART_C' => 'What does the speaker mean?',
+            default => 'Pertanyaan nomor '.$nextNumber,
+        };
+
+        $passageId = $request->input('passageId');
+        if (! $passageId && $section->section_type === 'READING') {
+            $passageId = $section->passages()->orderBy('order_index')->value('id');
+        }
+
+        $question = $section->questions()->create([
+            'passage_id' => $passageId ?: null,
+            'question_number' => (int) ($request->input('questionNumber') ?: $nextNumber),
+            'question_text' => trim((string) ($request->input('questionText') ?: $defaultText)),
+            'audio_url' => $request->input('audioUrl') ?: null,
+            'option_a' => trim((string) ($request->input('optionA') ?: 'Pilihan A')),
+            'option_b' => trim((string) ($request->input('optionB') ?: 'Pilihan B')),
+            'option_c' => trim((string) ($request->input('optionC') ?: 'Pilihan C')),
+            'option_d' => trim((string) ($request->input('optionD') ?: 'Pilihan D')),
+            'correct_answer' => strtoupper(trim((string) ($request->input('correctAnswer') ?: 'A'))),
+            'part_type' => trim((string) ($request->input('partType') ?: $defaultPartType)),
+        ]);
+
+        AuditLogger::record($request, 'question.created', ['auditable_type' => Question::class, 'auditable_id' => $question->id]);
+
+        return response()->json(['success' => true, 'question' => $this->camelize($question->toArray())], 201);
+    }
+
     public function question(Request $request, string $questionId): JsonResponse
     {
         if (! $this->admin($request)) {
@@ -711,10 +1243,75 @@ class AdminApiController extends Controller
         if (ExamSession::where('package_id', $question->section()->value('package_id'))->where('status', 'IN_PROGRESS')->exists()) {
             return response()->json(['error' => 'Paket sedang digunakan oleh peserta aktif dan tidak dapat diubah.'], 409);
         }
-        $question->update(array_filter(['question_text' => $request->input('questionText'), 'option_a' => $request->input('optionA'), 'option_b' => $request->input('optionB'), 'option_c' => $request->input('optionC'), 'option_d' => $request->input('optionD'), 'correct_answer' => $request->filled('correctAnswer') ? strtoupper($request->input('correctAnswer')) : null, 'part_type' => $request->input('partType'), 'audio_url' => $request->input('audioUrl')], fn ($v) => $v !== null));
+        $updates = array_filter([
+            'question_text' => $request->input('questionText'),
+            'option_a' => $request->input('optionA'),
+            'option_b' => $request->input('optionB'),
+            'option_c' => $request->input('optionC'),
+            'option_d' => $request->input('optionD'),
+            'correct_answer' => $request->filled('correctAnswer') ? strtoupper($request->input('correctAnswer')) : null,
+            'part_type' => $request->input('partType'),
+            'audio_url' => $request->input('audioUrl'),
+            'question_number' => $request->filled('questionNumber') ? (int) $request->input('questionNumber') : null,
+        ], fn ($v) => $v !== null);
+
+        if ($request->exists('passageId')) {
+            $updates['passage_id'] = $request->input('passageId') ?: null;
+        }
+
+        $question->update($updates);
         AuditLogger::record($request, 'question.updated', ['auditable_type' => Question::class, 'auditable_id' => $question->id]);
 
         return response()->json(['success' => true, 'question' => $this->camelize($question->toArray())]);
+    }
+
+    public function deleteQuestion(Request $request, string $questionId): JsonResponse
+    {
+        if (! $this->admin($request)) {
+            return $this->unauthorized();
+        }
+        $question = Question::find($questionId);
+        if (! $question) {
+            return response()->json(['error' => 'Soal tidak ditemukan.'], 404);
+        }
+        $section = $question->section;
+        if ($section && ExamSession::where('package_id', $section->package_id)->where('status', 'IN_PROGRESS')->exists()) {
+            return response()->json(['error' => 'Paket sedang digunakan oleh peserta aktif dan tidak dapat diubah.'], 409);
+        }
+        if ($section && $section->questions()->count() <= 1) {
+            return response()->json(['error' => 'Setiap section wajib menyisakan minimal 1 soal.'], 409);
+        }
+        $deletedId = $question->id;
+        $question->delete();
+        AuditLogger::record($request, 'question.deleted', ['auditable_type' => Question::class, 'auditable_id' => $deletedId]);
+
+        return response()->json(['success' => true]);
+    }
+
+    public function createPassage(Request $request, string $sectionId): JsonResponse
+    {
+        if (! $this->admin($request)) {
+            return $this->unauthorized();
+        }
+        $section = Section::find($sectionId);
+        if (! $section) {
+            return response()->json(['error' => 'Section tidak ditemukan.'], 404);
+        }
+        if (ExamSession::where('package_id', $section->package_id)->where('status', 'IN_PROGRESS')->exists()) {
+            return response()->json(['error' => 'Paket sedang digunakan oleh peserta aktif dan tidak dapat diubah.'], 409);
+        }
+
+        $nextOrder = (int) $section->passages()->max('order_index') + 1;
+        $passage = $section->passages()->create([
+            'title' => trim((string) ($request->input('title') ?: 'Passage '.$nextOrder)),
+            'content' => trim((string) ($request->input('content') ?: 'Tuliskan teks wacana atau naskah dialog di sini...')),
+            'audio_url' => $request->input('audioUrl') ?: null,
+            'order_index' => $nextOrder,
+        ]);
+
+        AuditLogger::record($request, 'passage.created', ['auditable_type' => Passage::class, 'auditable_id' => $passage->id]);
+
+        return response()->json(['success' => true, 'passage' => $this->camelize($passage->toArray())], 201);
     }
 
     public function passage(Request $request, string $passageId): JsonResponse
@@ -733,6 +1330,26 @@ class AdminApiController extends Controller
         AuditLogger::record($request, 'passage.updated', ['auditable_type' => Passage::class, 'auditable_id' => $passage->id]);
 
         return response()->json(['success' => true, 'passage' => $this->camelize($passage->toArray())]);
+    }
+
+    public function deletePassage(Request $request, string $passageId): JsonResponse
+    {
+        if (! $this->admin($request)) {
+            return $this->unauthorized();
+        }
+        $passage = Passage::find($passageId);
+        if (! $passage) {
+            return response()->json(['error' => 'Passage tidak ditemukan.'], 404);
+        }
+        if (ExamSession::where('package_id', $passage->section()->value('package_id'))->where('status', 'IN_PROGRESS')->exists()) {
+            return response()->json(['error' => 'Paket sedang digunakan oleh peserta aktif dan tidak dapat diubah.'], 409);
+        }
+        $deletedId = $passage->id;
+        Question::where('passage_id', $passage->id)->update(['passage_id' => null]);
+        $passage->delete();
+        AuditLogger::record($request, 'passage.deleted', ['auditable_type' => Passage::class, 'auditable_id' => $deletedId]);
+
+        return response()->json(['success' => true]);
     }
 
     public function uploadAudio(Request $request): JsonResponse
@@ -987,7 +1604,31 @@ class AdminApiController extends Controller
     /** @return array<string, mixed> */
     private function adminPayload(AdminUser $admin): array
     {
-        return ['id' => $admin->id, 'username' => $admin->username, 'name' => $admin->name, 'createdAt' => $admin->created_at];
+        return [
+            'id' => $admin->id,
+            'username' => $admin->username,
+            'name' => $admin->name,
+            'email' => $admin->email,
+            'photoUrl' => $admin->photo_url ? $this->normalizePublicAssetUrl((string) $admin->photo_url) : null,
+            'createdAt' => $admin->created_at,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function userPayload(User $user): array
+    {
+        return [
+            'id' => $user->id,
+            'name' => $user->name,
+            'email' => $user->email,
+            'idNumber' => $user->id_number,
+            'phoneNumber' => $user->phone_number,
+            'institution' => $user->institution,
+            'registrationsCount' => (int) ($user->registrations_count ?? 0),
+            'examSessionsCount' => (int) ($user->exam_sessions_count ?? 0),
+            'certificatesCount' => (int) ($user->certificates_count ?? 0),
+            'createdAt' => $user->created_at,
+        ];
     }
 
     /** @return array<string, mixed> */
@@ -1096,6 +1737,194 @@ class AdminApiController extends Controller
         }
 
         return null;
+    }
+
+    /** @return array<string, mixed> */
+    private function buildManualPackageSkeleton(string $title, string $code, ?string $description, string $preset): array
+    {
+        if ($preset === 'MINIMAL') {
+            return [
+                'title' => $title,
+                'code' => $code,
+                'description' => $description ?: 'Paket ujian dibuat secara manual.',
+                'sections' => [
+                    [
+                        'sectionType' => 'LISTENING',
+                        'title' => 'Section 1: Listening Comprehension',
+                        'durationMinutes' => 35,
+                        'orderIndex' => 1,
+                        'passages' => [],
+                        'questions' => [
+                            [
+                                'questionNumber' => 1,
+                                'partType' => 'PART_A',
+                                'questionText' => 'What does the speaker mean?',
+                                'optionA' => 'Pilihan A',
+                                'optionB' => 'Pilihan B',
+                                'optionC' => 'Pilihan C',
+                                'optionD' => 'Pilihan D',
+                                'correctAnswer' => 'A',
+                            ],
+                        ],
+                    ],
+                    [
+                        'sectionType' => 'STRUCTURE',
+                        'title' => 'Section 2: Structure & Written Expression',
+                        'durationMinutes' => 25,
+                        'orderIndex' => 2,
+                        'passages' => [],
+                        'questions' => [
+                            [
+                                'questionNumber' => 1,
+                                'partType' => 'STRUCTURE',
+                                'questionText' => '_____ is one of the most important elements in academic writing.',
+                                'optionA' => 'Clarity',
+                                'optionB' => 'Because clarity',
+                                'optionC' => 'That clarity',
+                                'optionD' => 'To be clear',
+                                'correctAnswer' => 'A',
+                            ],
+                        ],
+                    ],
+                    [
+                        'sectionType' => 'READING',
+                        'title' => 'Section 3: Reading Comprehension',
+                        'durationMinutes' => 55,
+                        'orderIndex' => 3,
+                        'passages' => [
+                            [
+                                'passageIndex' => 1,
+                                'title' => 'Passage 1 (Questions 1-10)',
+                                'content' => 'Tuliskan teks wacana bacaan (Reading Passage 1) di sini...',
+                            ],
+                        ],
+                        'questions' => [
+                            [
+                                'questionNumber' => 1,
+                                'partType' => 'READING',
+                                'passageIndex' => 1,
+                                'questionText' => 'What is the main topic of the passage?',
+                                'optionA' => 'Pilihan A',
+                                'optionB' => 'Pilihan B',
+                                'optionC' => 'Pilihan C',
+                                'optionD' => 'Pilihan D',
+                                'correctAnswer' => 'A',
+                            ],
+                        ],
+                    ],
+                ],
+            ];
+        }
+
+        // Default: FULL_140 (50 Listening, 40 Structure, 50 Reading with 5 Passages)
+        $listeningPassages = [
+            ['passageIndex' => 1, 'title' => 'Part B - Conversation 1 (Questions 31-34)', 'content' => 'Naskah percakapan panjang (Long Conversation 1) untuk soal nomor 31-34.'],
+            ['passageIndex' => 2, 'title' => 'Part B - Conversation 2 (Questions 35-38)', 'content' => 'Naskah percakapan panjang (Long Conversation 2) untuk soal nomor 35-38.'],
+            ['passageIndex' => 3, 'title' => 'Part C - Talk 1 (Questions 39-42)', 'content' => 'Naskah monolog akademik (Talk 1) untuk soal nomor 39-42.'],
+            ['passageIndex' => 4, 'title' => 'Part C - Talk 2 (Questions 43-46)', 'content' => 'Naskah monolog akademik (Talk 2) untuk soal nomor 43-46.'],
+            ['passageIndex' => 5, 'title' => 'Part C - Talk 3 (Questions 47-50)', 'content' => 'Naskah monolog akademik (Talk 3) untuk soal nomor 47-50.'],
+        ];
+        $listeningQuestions = [];
+        for ($i = 1; $i <= 50; $i++) {
+            $partType = $i <= 30 ? 'PART_A' : ($i <= 38 ? 'PART_B' : 'PART_C');
+            $passageIndex = match (true) {
+                $i >= 31 && $i <= 34 => 1,
+                $i >= 35 && $i <= 38 => 2,
+                $i >= 39 && $i <= 42 => 3,
+                $i >= 43 && $i <= 46 => 4,
+                $i >= 47 => 5,
+                default => null,
+            };
+            $q = [
+                'questionNumber' => $i,
+                'partType' => $partType,
+                'questionText' => "Listening Question #{$i} ({$partType}) - Silakan isi naskah/pertanyaan soal ini.",
+                'optionA' => 'Pilihan A',
+                'optionB' => 'Pilihan B',
+                'optionC' => 'Pilihan C',
+                'optionD' => 'Pilihan D',
+                'correctAnswer' => 'A',
+            ];
+            if ($passageIndex !== null) {
+                $q['passageIndex'] = $passageIndex;
+            }
+            $listeningQuestions[] = $q;
+        }
+
+        $structureQuestions = [];
+        for ($i = 1; $i <= 40; $i++) {
+            $isWritten = $i > 15;
+            $structureQuestions[] = [
+                'questionNumber' => $i,
+                'partType' => $isWritten ? 'WRITTEN_EXPRESSION' : 'STRUCTURE',
+                'questionText' => $isWritten
+                    ? "The {A:first} part of the {B:sentence} {C:contain} an error to {D:identify} (#{$i})."
+                    : "Structure Question #{$i} - _____ is required to complete this sentence.",
+                'optionA' => 'Pilihan A',
+                'optionB' => 'Pilihan B',
+                'optionC' => 'Pilihan C',
+                'optionD' => 'Pilihan D',
+                'correctAnswer' => 'A',
+            ];
+        }
+
+        $readingPassages = [];
+        for ($p = 1; $p <= 5; $p++) {
+            $startQ = ($p - 1) * 10 + 1;
+            $endQ = $p * 10;
+            $readingPassages[] = [
+                'passageIndex' => $p,
+                'title' => "Passage {$p} (Questions {$startQ}-{$endQ})",
+                'content' => "Tuliskan teks bacaan akademik untuk Reading Passage {$p} (Soal nomor {$startQ} sampai {$endQ}) di sini...",
+            ];
+        }
+        $readingQuestions = [];
+        for ($i = 1; $i <= 50; $i++) {
+            $passageIndex = (int) ceil($i / 10);
+            $readingQuestions[] = [
+                'questionNumber' => $i,
+                'partType' => 'READING',
+                'passageIndex' => $passageIndex,
+                'questionText' => "Reading Question #{$i} (Passage {$passageIndex}) - Silakan isi pertanyaan bacaan ini.",
+                'optionA' => 'Pilihan A',
+                'optionB' => 'Pilihan B',
+                'optionC' => 'Pilihan C',
+                'optionD' => 'Pilihan D',
+                'correctAnswer' => 'A',
+            ];
+        }
+
+        return [
+            'title' => $title,
+            'code' => $code,
+            'description' => $description ?: 'Paket ujian standar TOEFL ITP (140 Soal).',
+            'sections' => [
+                [
+                    'sectionType' => 'LISTENING',
+                    'title' => 'Section 1: Listening Comprehension',
+                    'durationMinutes' => 35,
+                    'orderIndex' => 1,
+                    'passages' => $listeningPassages,
+                    'questions' => $listeningQuestions,
+                ],
+                [
+                    'sectionType' => 'STRUCTURE',
+                    'title' => 'Section 2: Structure & Written Expression',
+                    'durationMinutes' => 25,
+                    'orderIndex' => 2,
+                    'passages' => [],
+                    'questions' => $structureQuestions,
+                ],
+                [
+                    'sectionType' => 'READING',
+                    'title' => 'Section 3: Reading Comprehension',
+                    'durationMinutes' => 55,
+                    'orderIndex' => 3,
+                    'passages' => $readingPassages,
+                    'questions' => $readingQuestions,
+                ],
+            ],
+        ];
     }
 
     /** @return array<int, array<string, mixed>> */
